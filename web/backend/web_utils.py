@@ -46,9 +46,9 @@ class WebUtils:
         """
         try:
             version_res = RequestUtils(proxies=Config().get_proxies()).get_res(
-                "https://api.github.com/repos/wangyan/nas-tools/releases/latest")
+                "https://api.github.com/repos/leesonaa/nas-tools/releases/latest")
             commit_res = RequestUtils(proxies=Config().get_proxies()).get_res(
-                "https://api.github.com/repos/wangyan/nas-tools/commits/master")
+                "https://api.github.com/repos/leesonaa/nas-tools/commits/master")
             if version_res and commit_res:
                 ver_json = version_res.json()
                 commit_json = commit_res.json()
