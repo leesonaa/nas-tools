@@ -18,7 +18,7 @@
 
 **注意**
 
-- 媒体目录的设置必须符合 [配置说明](https://github.com/wangyan/nas-tools#%E9%85%8D%E7%BD%AE) 的要求。
+- 媒体目录的设置必须符合 [配置说明](https://github.com/leesonaa/nas-tools#%E9%85%8D%E7%BD%AE) 的要求。
 
 - umask含义详见：http://www.01happy.com/linux-umask-analyze 。
 
