@@ -214,7 +214,7 @@ class Qbittorrent(_IDownloadClient):
         """
         if not self.qbc:
             return None
-        torrents, error = self.get_torrents(status=["completed"], ids=ids, tag=tag)
+        torrents, error = self.get_torrents(status="completed", ids=ids, tag=tag)
         return None if error else torrents or []
 
     def get_downloading_torrents(self, ids=None, tag=None):
@@ -225,7 +225,7 @@ class Qbittorrent(_IDownloadClient):
         if not self.qbc:
             return None
         torrents, error = self.get_torrents(ids=ids,
-                                            status=["downloading"],
+                                            status="downloading",
                                             tag=tag)
         return None if error else torrents or []
 
@@ -556,7 +556,7 @@ class Qbittorrent(_IDownloadClient):
         if not self.qbc or not torrent_id or not urls:
             return False
         try:
-            self.qbc.torrents_add_webseeds(torrent_hashes=[torrent_id], urls=urls)
+            self.qbc.torrents_add_webseeds(torrent_hash=torrent_id, urls=urls)
             return True
         except Exception as err:
             log.error(f"【{self.client_name}】{self.name} 添加HTTP源出错：{str(err)}")
