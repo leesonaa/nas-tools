@@ -551,6 +551,17 @@ class Qbittorrent(_IDownloadClient):
             log.error(f"【{self.client_name}】{self.name} 添加种子出错：{str(err)}")
             return False
 
+    def add_webseeds(self, torrent_id, urls):
+        """为已添加的任务追加 HTTP 源。"""
+        if not self.qbc or not torrent_id or not urls:
+            return False
+        try:
+            self.qbc.torrents_add_webseeds(torrent_hashes=[torrent_id], urls=urls)
+            return True
+        except Exception as err:
+            log.error(f"【{self.client_name}】{self.name} 添加HTTP源出错：{str(err)}")
+            return False
+
     def start_torrents(self, ids):
         if not self.qbc:
             return False

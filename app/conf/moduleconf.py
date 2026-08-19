@@ -700,6 +700,14 @@ class ModuleConf(object):
                         "auto": "自动"
                     },
                     "default": "manual"
+                },
+                "http_sources": {
+                    "id": "qbittorrent_http_sources",
+                    "required": False,
+                    "title": "HTTP 源",
+                    "tooltip": "每行填写一个 HTTP 源地址，任务添加到 qBittorrent 后自动追加到该任务的 HTTP 源列表。",
+                    "type": "textarea",
+                    "placeholder": "http://example.com/file.iso"
                 }
             }
         },

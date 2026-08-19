@@ -473,6 +473,11 @@ class Downloader:
                                              cookie=site_info.get("cookie"))
                 if ret:
                     download_id = downloader.get_torrent_id_by_tag(torrent_tag)
+                    http_sources = downloader_conf.get("config", {}).get("http_sources")
+                    if download_id and http_sources:
+                        http_sources = [source.strip() for source in str(http_sources).splitlines() if source.strip()]
+                        if http_sources:
+                            downloader.add_webseeds(download_id, http_sources)
             else:
                 # 其它下载器，添加下载后需返回下载ID或添加状态
                 ret = downloader.add_torrent(content,
