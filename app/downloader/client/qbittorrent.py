@@ -423,6 +423,16 @@ class Qbittorrent(_IDownloadClient):
             log.debug(f"【{self.client_name}】回查磁力任务失败：{str(err)}")
         return None
 
+    def __find_tagged_torrent(self, tag):
+        if not self.qbc or not tag:
+            return None
+        for _ in range(3):
+            torrent_id = self.__get_last_add_torrentid_by_tag(tag=tag)
+            if torrent_id:
+                return torrent_id
+            time.sleep(1)
+        return None
+
     def add_torrent(self,
                     content,
                     is_paused=False,
@@ -525,12 +535,16 @@ class Qbittorrent(_IDownloadClient):
                 self._last_torrent_id = self.__find_magnet_torrent(content)
                 return True
             self._last_torrent_id = self.__find_magnet_torrent(content)
+            if not self._last_torrent_id:
+                self._last_torrent_id = self.__find_tagged_torrent(tags)
             if self._last_torrent_id:
-                log.warn(f"【{self.client_name}】qB 已存在或已接受该磁力任务，按成功处理")
+                log.warn(f"【{self.client_name}】qB 已存在或已接受该任务，按成功处理")
                 return True
             return False
         except Exception as err:
             self._last_torrent_id = self.__find_magnet_torrent(content)
+            if not self._last_torrent_id:
+                self._last_torrent_id = self.__find_tagged_torrent(tags)
             if self._last_torrent_id:
                 log.warn(f"【{self.client_name}】qB 请求异常但任务已存在，按成功处理：{str(err)}")
                 return True
