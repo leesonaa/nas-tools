@@ -30,6 +30,7 @@ class Qbittorrent(_IDownloadClient):
     password = None
     download_dir = []
     name = "测试"
+    _last_torrent_id = None
 
     def __init__(self, config):
         self._client_config = config
@@ -83,6 +84,7 @@ class Qbittorrent(_IDownloadClient):
                 self.ver = qbt.app_version()
             except qbittorrentapi.LoginFailed as e:
                 log.error(f"【{self.client_name}】{self.name} 登录出错：{str(e)}")
+                return None
             return qbt
         except Exception as err:
             log.error(f"【{self.client_name}】{self.name} 连接出错：{str(err)}")
@@ -101,6 +103,8 @@ class Qbittorrent(_IDownloadClient):
         """
         根据设置的标签，自动管理模式下自动创建QB分类
         """
+        if not self.qbc:
+            return
         # 手动
         if self._torrent_management == "manual":
             return
@@ -137,7 +141,7 @@ class Qbittorrent(_IDownloadClient):
     def __get_qb_auto(self):
         """
         查询下载器是否开启自动管理
-        :return: 
+        :return:
         """
         if not self.qbc:
             return {}
@@ -396,7 +400,28 @@ class Qbittorrent(_IDownloadClient):
             else:
                 self.remove_torrents_tag(torrent_id, tag)
                 break
+        if torrent_id is None:
+            torrent_id = self._last_torrent_id
         return torrent_id
+
+    @staticmethod
+    def __get_magnet_hash(content):
+        if not isinstance(content, str) or not content.lower().startswith("magnet:"):
+            return None
+        match = re.search(r"xt=urn:btih:([a-fA-F0-9]{40})", content)
+        return match.group(1).lower() if match else None
+
+    def __find_magnet_torrent(self, content):
+        torrent_hash = self.__get_magnet_hash(content)
+        if not torrent_hash or not self.qbc:
+            return None
+        try:
+            torrents, error = self.get_torrents(ids=[torrent_hash])
+            if not error and torrents:
+                return torrents[0].get("hash") or torrent_hash
+        except Exception as err:
+            log.debug(f"【{self.client_name}】回查磁力任务失败：{str(err)}")
+        return None
 
     def add_torrent(self,
                     content,
@@ -426,6 +451,7 @@ class Qbittorrent(_IDownloadClient):
         :param cookie: 站点Cookie用于辅助下载种子
         :return: bool
         """
+        self._last_torrent_id = None
         if not self.qbc or not content:
             return False
         if isinstance(content, str):
@@ -495,8 +521,19 @@ class Qbittorrent(_IDownloadClient):
                                             seeding_time_limit=seeding_time_limit,
                                             use_auto_torrent_management=is_auto,
                                             cookie=cookie)
-            return True if qbc_ret and str(qbc_ret).find("Ok") != -1 else False
+            if qbc_ret and str(qbc_ret).find("Ok") != -1:
+                self._last_torrent_id = self.__find_magnet_torrent(content)
+                return True
+            self._last_torrent_id = self.__find_magnet_torrent(content)
+            if self._last_torrent_id:
+                log.warn(f"【{self.client_name}】qB 已存在或已接受该磁力任务，按成功处理")
+                return True
+            return False
         except Exception as err:
+            self._last_torrent_id = self.__find_magnet_torrent(content)
+            if self._last_torrent_id:
+                log.warn(f"【{self.client_name}】qB 请求异常但任务已存在，按成功处理：{str(err)}")
+                return True
             log.error(f"【{self.client_name}】{self.name} 添加种子出错：{str(err)}")
             return False
 

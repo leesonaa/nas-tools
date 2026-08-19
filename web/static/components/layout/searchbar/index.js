@@ -107,7 +107,7 @@ export class LayoutSearchbar extends CustomElement {
                   if (this._search_source === "person") {
                     navmenu("discovery_person?&type=ALL&title=演员搜索&subtitle=" + this.input.value + "&keyword=" + this.input.value);
                   } else {
-                    navmenu("recommend?type=SEARCH&title=搜索结果&subtitle=" + this.input.value + "&keyword=" + this.input.value + "&source=" + this._search_source);                   
+                    navmenu("recommend?type=SEARCH&title=搜索结果&subtitle=" + this.input.value + "&keyword=" + this.input.value + "&source=" + this._search_source);
                   }
                   this.input.value = "";
                 }
@@ -164,7 +164,7 @@ export class LayoutSearchbar extends CustomElement {
                   注销 <span class="text-muted mx-3">${this.layout_username}</span>
                 </a>
                 <div class="dropdown-divider"></div>
-                <a href="https://github.com/0xforee/nas-tools/blob/master/README.md" target="_blank" class="dropdown-item">帮助中心</a>
+                <a href="https://github.com/leesonaa/nas-tools/blob/master/README.md" target="_blank" class="dropdown-item">帮助中心</a>
               </div>
             </div>
           </div>

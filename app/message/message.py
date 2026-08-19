@@ -95,7 +95,7 @@ class Message(object):
         state, ret_msg = self.__build_class(ctype=ctype,
                                             conf=config).send_msg(title="测试",
                                                                   text="这是一条测试消息",
-                                                                  url="https://github.com/0xforee/nas-tools")
+                                                                  url="https://github.com/leesonaa/nas-tools")
         if not state:
             log.error(f"【Message】{ctype} 发送测试消息失败：%s" % ret_msg)
         return state
@@ -356,7 +356,7 @@ class Message(object):
         :return: 发送状态、错误信息
         """
         msg_title = f"{media_info.get_title_string()} 已入库"
-        
+
         msg_str = ""
 
         # 获取自定义，如：简体内嵌.v2
@@ -384,7 +384,7 @@ class Message(object):
         if media_info.category:
             if category_flag:
                 msg_str = f"{msg_str}，类型：{media_info.category}"
-        
+
         if exist_filenum != 0:
             msg_str = f"{msg_str}，{exist_filenum}个文件已存在"
 

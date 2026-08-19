@@ -646,7 +646,7 @@ class WebAction:
                                                 download_setting=dl_setting,
                                                 in_from=SearchType.WEB,
                                                 user_name=current_user.username)
-        if not ret:
+        if not ret and ret_msg:
             return {"code": 1, "msg": ret_msg or "如连接正常，请检查下载任务是否存在"}
         return {"code": 0, "msg": "下载成功"}
 

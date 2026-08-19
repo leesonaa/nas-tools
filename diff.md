@@ -2,14 +2,14 @@
 # NAS媒体库管理工具
 
 
-[![GitHub stars](https://img.shields.io/github/stars/0xforee/nas-tools?style=plastic)](https://github.com/0xforee/nas-tools/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/0xforee/nas-tools?style=plastic)](https://github.com/0xforee/nas-tools/network/members)
-[![GitHub issues](https://img.shields.io/github/issues/0xforee/nas-tools?style=plastic)](https://github.com/0xforee/nas-tools/issues)
-[![GitHub license](https://img.shields.io/github/license/0xforee/nas-tools?style=plastic)](https://github.com/0xforee/nas-tools/blob/master/LICENSE.md)
-[![Docker pulls](https://img.shields.io/docker/pulls/0xforee/nas-tools?style=plastic)](https://hub.docker.com/r/0xforee/nas-tools)
-[![Platform](https://img.shields.io/badge/platform-amd64/arm64-pink?style=plastic)](https://hub.docker.com/r/0xforee/nas-tools)
+[![GitHub stars](https://img.shields.io/github/stars/leesonaa/nas-tools?style=plastic)](https://github.com/leesonaa/nas-tools/stargazers)
+[![GitHub forks](https://img.shields.io/github/forks/leesonaa/nas-tools?style=plastic)](https://github.com/leesonaa/nas-tools/network/members)
+[![GitHub issues](https://img.shields.io/github/issues/leesonaa/nas-tools?style=plastic)](https://github.com/leesonaa/nas-tools/issues)
+[![GitHub license](https://img.shields.io/github/license/leesonaa/nas-tools?style=plastic)](https://github.com/leesonaa/nas-tools/blob/master/LICENSE.md)
+[![Docker pulls](https://img.shields.io/docker/pulls/leesonaa/nas-tools?style=plastic)](https://hub.docker.com/r/leesonaa/nas-tools)
+[![Platform](https://img.shields.io/badge/platform-amd64/arm64-pink?style=plastic)](https://hub.docker.com/r/leesonaa/nas-tools)
 
-Docker：https://hub.docker.com/repository/docker/0xforee/nas-tools
+Docker：https://hub.docker.com/repository/docker/leesonaa/nas-tools
 
 ## 基于官方主线版本增强
 1. 基于主线最新 3.2.3 版本制作，配置可以完美迁移

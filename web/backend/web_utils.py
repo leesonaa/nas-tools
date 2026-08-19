@@ -54,9 +54,9 @@ class WebUtils:
         try:
             releases_update_only = True
             version_res = RequestUtils(proxies=Config().get_proxies()).get_res(
-                "https://api.github.com/repos/0xforee/nas-tools/releases/latest")
+                "https://api.github.com/repos/leesonaa/nas-tools/releases/latest")
             commit_res = RequestUtils(proxies=Config().get_proxies()).get_res(
-                "https://api.github.com/repos/0xforee/nas-tools/commits/master")
+                "https://api.github.com/repos/leesonaa/nas-tools/commits/master")
             if version_res and commit_res:
                 ver_json = version_res.json()
                 commit_json = commit_res.json()
@@ -205,6 +205,6 @@ class WebUtils:
             ret = RequestUtils().get_res(url)
         if ret:
             return ret.content
-        
+
         # 避免 lru 缓存失败的情况，exception 不会被缓存
         raise Exception('request failed')

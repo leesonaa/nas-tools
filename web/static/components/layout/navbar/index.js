@@ -22,7 +22,7 @@ export class LayoutNavbar extends CustomElement {
     this.layout_appversion = "v3.3.0";
     this._active_name = "";
     this._update_appversion = "";
-    this._update_url = "https://github.com/0xforee/nas-tools";
+    this._update_url = "https://github.com/leesonaa/nas-tools";
     this._is_update = false;
     this._is_expand = false;
     this.classList.add("navbar","navbar-vertical","navbar-expand-lg","lit-navbar-fixed","lit-navbar","lit-navbar-hide-scrollbar");
@@ -88,7 +88,7 @@ export class LayoutNavbar extends CustomElement {
             url = ret.url;
             break;
           case 2:
-            url = "https://github.com/0xforee/nas-tools/commits/master"
+            url = "https://github.com/leesonaa/nas-tools/commits/master"
             break;
         }
         if (url) {
@@ -200,11 +200,11 @@ export class LayoutNavbar extends CustomElement {
 
   _render_page_item(item, child) {
     return html`
-    <a class="nav-link lit-navbar-accordion-item${this._active_name === item.page ? "-active" : ""} my-1 p-2 ${child ? "ps-3" : "lit-navbar-accordion-button"}" 
+    <a class="nav-link lit-navbar-accordion-item${this._active_name === item.page ? "-active" : ""} my-1 p-2 ${child ? "ps-3" : "lit-navbar-accordion-button"}"
       href="#${item.page}" data-bs-dismiss="offcanvas" aria-label="Close"
       style="${child ? "font-size:1rem" : "font-size:1.1rem;"}"
       data-lit-page=${item.page}
-      @click=${ () => { 
+      @click=${ () => {
         this._add_page_to_url(item.page);
         navmenu(item.page);
       }}>
@@ -214,7 +214,7 @@ export class LayoutNavbar extends CustomElement {
       <span class="nav-link-title">
         ${item.also ?? item.name}
       </span>
-    </a>`    
+    </a>`
   }
 
 }
