@@ -18,7 +18,7 @@ class Lou1(_IPluginModule):
     module_icon = "lou1.png"
     module_color = "#2D2D2D"
     module_version = "0.4"
-    module_author = "gay"
+    module_author = "leeson"
     author_url = ""
     module_config_prefix = "lou1_"
     module_order = 20
