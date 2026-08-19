@@ -1,9 +1,6 @@
 name: NAStool Docker
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - version.py
 
 jobs:
   alpine:
@@ -46,7 +43,7 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - 
+      -
         name: Build Image
         uses: docker/build-push-action@v5
         with:
@@ -99,7 +96,7 @@ jobs:
           username: ${{ secrets.DOCKER_USERNAME }}
           password: ${{ secrets.DOCKER_PASSWORD }}
 
-      - 
+      -
         name: Build Image
         uses: docker/build-push-action@v5
         with:

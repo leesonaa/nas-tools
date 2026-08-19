@@ -1,9 +1,6 @@
 name: NAStool Package
 on:
   workflow_dispatch:
-  push:
-    paths:
-      - version.py
 
 jobs:
   Windows-build:
