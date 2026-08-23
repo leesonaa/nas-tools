@@ -1,4 +1,5 @@
 import os
+import time
 from threading import Lock
 from enum import Enum
 import json
@@ -778,6 +779,33 @@ class Downloader:
                     need_tvs.pop(tmdbid)
             return need
 
+        def __wait_magnet_files(downloader_id, download_id, retries=6, interval=5):
+            """
+            磁力链接添加后没有文件清单，需要等待下载器解析出元数据（拿到 peer/DHT 数据）
+            后才能读到种子内的文件列表，轮询等待，超时则放弃
+            """
+            for _ in range(retries):
+                time.sleep(interval)
+                torrent_files = self.get_files(tid=download_id, downloader_id=downloader_id)
+                if torrent_files:
+                    return torrent_files
+            return []
+
+        def __episodes_from_files(torrent_files):
+            """
+            从种子文件清单中识别出集数
+            """
+            episodes = []
+            for torrent_file in torrent_files or []:
+                file_name = torrent_file.get("name")
+                if not file_name or os.path.splitext(file_name)[-1] not in RMT_MEDIAEXT:
+                    continue
+                meta = MetaInfo(file_name)
+                if not meta.begin_episode:
+                    continue
+                episodes = list(set(episodes).union(set(meta.get_episode_list())))
+            return episodes
+
         def __get_season_episodes(tmdbid, season):
             """
             获取需要的季的集数
@@ -900,20 +928,46 @@ class Downloader:
                                      or set(item.get_episode_list()).intersection(set(need_episodes))) \
                                 and len(item.get_season_list()) == 1 \
                                 and item.get_season_list()[0] == need_season:
-                            # 检查种子看是否有需要的集
-                            torrent_episodes, torrent_path = self.get_torrent_episodes(
-                                url=item.enclosure,
-                                page_url=item.page_url)
+                            is_magnet = str(item.enclosure or "").lower().startswith("magnet:")
+                            downloader_id = download_id = None
+                            torrent_path = None
+                            if is_magnet:
+                                # 磁力链接没有文件清单可供预读（种子内容需连上 DHT/Peer 才能解析），
+                                # 只能先暂停添加，等下载器解析出元数据后再判断种子里是否包含需要的集，
+                                # 常见于全集资源发布后分集资源不再更新、订阅卡在缺集状态的场景
+                                downloader_id, download_id = __download(download_item=item,
+                                                                        is_paused=True)
+                                if not download_id:
+                                    continue
+                                torrent_files = __wait_magnet_files(downloader_id, download_id)
+                                torrent_episodes = __episodes_from_files(torrent_files)
+                                if not torrent_episodes:
+                                    log.warn("【Downloader】%s 磁力链接解析元数据超时或未识别到可用媒体文件，跳过..."
+                                            % item.org_string)
+                                    self.delete_torrents(ids=download_id,
+                                                         downloader_id=downloader_id,
+                                                         delete_file=True)
+                                    continue
+                            else:
+                                # 检查种子看是否有需要的集
+                                torrent_episodes, torrent_path = self.get_torrent_episodes(
+                                    url=item.enclosure,
+                                    page_url=item.page_url)
                             selected_episodes = set(torrent_episodes).intersection(set(need_episodes))
                             if not selected_episodes:
                                 log.info("【Downloader】%s 没有需要的集，跳过..." % item.org_string)
+                                if download_id:
+                                    self.delete_torrents(ids=download_id,
+                                                         downloader_id=downloader_id,
+                                                         delete_file=True)
                                 continue
-                            # 添加下载并暂停
-                            downloader_id, download_id = __download(download_item=item,
-                                                                    torrent_file=torrent_path,
-                                                                    is_paused=True)
                             if not download_id:
-                                continue
+                                # 添加下载并暂停
+                                downloader_id, download_id = __download(download_item=item,
+                                                                        torrent_file=torrent_path,
+                                                                        is_paused=True)
+                                if not download_id:
+                                    continue
                             # 更新仍需集数
                             need_episodes = __update_episodes(tmdbid=need_tmdbid,
                                                               need=need_episodes,
