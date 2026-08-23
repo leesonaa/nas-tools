@@ -947,6 +947,8 @@ class Downloader:
                                     self.delete_torrents(ids=download_id,
                                                          downloader_id=downloader_id,
                                                          delete_file=True)
+                                    if item in return_items:
+                                        return_items.remove(item)
                                     continue
                             else:
                                 # 检查种子看是否有需要的集
@@ -960,6 +962,8 @@ class Downloader:
                                     self.delete_torrents(ids=download_id,
                                                          downloader_id=downloader_id,
                                                          delete_file=True)
+                                    if item in return_items:
+                                        return_items.remove(item)
                                 continue
                             if not download_id:
                                 # 添加下载并暂停
