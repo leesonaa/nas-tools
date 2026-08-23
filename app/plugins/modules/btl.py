@@ -229,7 +229,15 @@ class Btl(_IPluginModule):
         candidates = [entry.get("title"), entry.get("otitle")]
         alias = entry.get("alias") or ""
         candidates.extend(re.split(r"[,，/|、]", str(alias)))
-        return any(Btl.__normalize_match_title(candidate) == keyword for candidate in candidates)
+        for candidate in candidates:
+            candidate = Btl.__normalize_match_title(candidate)
+            if not candidate:
+                continue
+            # 站点条目常按季拆分命名（如“XXX 第二季”），关键字为剧名不含季号，
+            # 因此用包含匹配而非完全相等，避免分季条目被误判为“非同名”而漏搜
+            if candidate == keyword or keyword in candidate or candidate in keyword:
+                return True
+        return False
 
     def __get_detail(self, video_id):
         if not video_id:
