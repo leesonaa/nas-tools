@@ -1,5 +1,6 @@
 import os
 import time
+import re
 from threading import Lock
 from enum import Enum
 import json
@@ -815,6 +816,30 @@ class Downloader:
                     need_tvs.pop(tmdbid)
             return need
 
+        def __extract_magnet_hash(url):
+            """
+            直接从磁力链接里解析出 info-hash，不依赖下载器的按标签查找机制
+            """
+            match = re.search(r"btih:([A-Za-z0-9]+)", url or "", re.IGNORECASE)
+            return match.group(1).lower() if match else None
+
+        def __resolve_downloader_id(download_item):
+            """
+            提前解析出某个媒体项最终会落到哪个下载器，用于在真正调用 download() 之前
+            按 info-hash 查询该种子是否已经存在（跟 download() 内部选择下载器的逻辑保持一致）
+            """
+            _download_setting = download_item.download_setting
+            if not _download_setting and download_item.site:
+                _download_setting = self.sites.get_site_download_setting(download_item.site)
+            if _download_setting == "-2":
+                _attr = {}
+            elif _download_setting:
+                _attr = self.get_download_setting(_download_setting) \
+                        or self.get_download_setting(self.default_download_setting_id)
+            else:
+                _attr = self.get_download_setting(self.default_download_setting_id)
+            return _attr.get("downloader")
+
         def __wait_magnet_files(downloader_id, download_id, retries=10, interval=6):
             """
             磁力链接添加后没有文件清单，需要等待下载器解析出元数据（拿到 peer/DHT 数据）
@@ -969,17 +994,53 @@ class Downloader:
                             torrent_path = None
                             if is_magnet:
                                 # 磁力链接没有文件清单可供预读（种子内容需连上 DHT/Peer 才能解析），
-                                # 只能先暂停添加，等下载器解析出元数据后再判断种子里是否包含需要的集，
-                                # 常见于全集资源发布后分集资源不再更新、订阅卡在缺集状态的场景
-                                downloader_id, download_id = __download(download_item=item,
-                                                                        is_paused=True,
-                                                                        notify=False)
-                                if not download_id:
+                                # 元数据解析所需时间不可控（可能几秒，也可能远超一次订阅检索的等待
+                                # 窗口）。之前的实现是等一个固定时长、超时就删种重来，结果是每一轮
+                                # 都在种子快解析完时把它杀掉、下一轮又从零开始，永远给不到它真正解析
+                                # 完成的机会。现在改成：按磁力链接自带的 info-hash 直接查下载器里有
+                                # 没有这个种子——有就直接看它现在解析出文件清单没有，不重新添加、不
+                                # 清零进度；没有就加一个暂停任务，只做一次很短的快速探测；不管哪种
+                                # 情况，只要还没解析出来就先跳过留给下一轮，让它在后台继续尝试。
+                                magnet_hash = __extract_magnet_hash(item.enclosure)
+                                probe_downloader_id = __resolve_downloader_id(item)
+                                existing_torrent = None
+                                if magnet_hash and probe_downloader_id:
+                                    existing_list = self.get_torrents(ids=[magnet_hash],
+                                                                      downloader_id=probe_downloader_id)
+                                    if existing_list:
+                                        existing_torrent = existing_list[0]
+                                if existing_torrent is not None:
+                                    downloader_id, download_id = probe_downloader_id, magnet_hash
+                                    torrent_files = self.get_files(tid=download_id,
+                                                                   downloader_id=downloader_id)
+                                else:
+                                    downloader_id, download_id = __download(download_item=item,
+                                                                            is_paused=True,
+                                                                            notify=False)
+                                    if not download_id:
+                                        continue
+                                    # 只做一次很短的快速探测（多数健康种子几秒内就能拿到元数据），
+                                    # 拿不到不删种，留给下一轮订阅检索时凭 info-hash 再确认一次
+                                    torrent_files = __wait_magnet_files(downloader_id, download_id,
+                                                                        retries=3, interval=3)
+                                if not torrent_files:
+                                    added_on = existing_torrent.get("added_on") if existing_torrent else None
+                                    if added_on and (time.time() - added_on) > 7200:
+                                        # 加进去超过2小时还没解析出元数据，基本可以判定是死种
+                                        log.warn("【Downloader】%s 磁力元数据解析超过2小时仍未完成，"
+                                                "判定为死种，删除..." % item.org_string)
+                                        self.delete_torrents(ids=download_id,
+                                                             downloader_id=downloader_id,
+                                                             delete_file=True)
+                                        if item in return_items:
+                                            return_items.remove(item)
+                                    else:
+                                        log.info("【Downloader】%s 磁力元数据仍在解析中，本轮先跳过，"
+                                                "留给下次订阅检索再确认..." % item.org_string)
                                     continue
-                                torrent_files = __wait_magnet_files(downloader_id, download_id)
                                 torrent_episodes = __episodes_from_files(torrent_files)
                                 if not torrent_episodes:
-                                    log.warn("【Downloader】%s 磁力链接解析元数据超时或未识别到可用媒体文件，跳过..."
+                                    log.info("【Downloader】%s 元数据已解析但未识别到可用媒体文件，删除该任务..."
                                             % item.org_string)
                                     self.delete_torrents(ids=download_id,
                                                          downloader_id=downloader_id,
