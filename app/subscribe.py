@@ -624,7 +624,6 @@ class Subscribe:
             season = rss_info.get("season") or 1
             total = rss_info.get("total")
             total_ep = rss_info.get("total_ep")
-            lack = rss_info.get("lack")
             # 更新TMDB信息
             media_info = self.__get_media_info(tmdbid=tmdbid,
                                                name=name,
@@ -639,8 +638,19 @@ class Subscribe:
                 if total_ep:
                     total_episode = total_ep
                 if total_episode and (name != media_info.title or total != total_episode) and name_follow_tmdb_changed:
-                    # 新的缺失集数
-                    lack_episode = total_episode - (total - lack)
+                    # 重新计算缺失集列表：不能像原来那样单纯用"总集数-缺集数量"反推出
+                    # 一段连续的尾部区间（range(total_episode - lack_episode + 1, total_episode + 1)），
+                    # 那样会把原本记录的、不在尾部的缺集（比如中间跳过的集）直接丢掉，
+                    # 也会把已经下载过的集重新错误标记成缺失。正确做法是在原来实际记录
+                    # 的缺失集列表基础上，只把因总集数变多而新增的集追加进去；总集数没变
+                    # 或者只是标题变了，缺失列表本身不需要重新计算，直接沿用原记录。
+                    old_lack_episodes = self.get_subscribe_tv_episodes(rssid) or []
+                    if total_episode > (total or 0):
+                        new_lack_episodes = sorted(set(old_lack_episodes)
+                                                   | set(range((total or 0) + 1, total_episode + 1)))
+                    else:
+                        new_lack_episodes = sorted(set(old_lack_episodes))
+                    lack_episode = len(new_lack_episodes)
                     log.info(
                         f"【Subscribe】检测到TMDB信息变化，更新电视剧订阅 {name} 为 {media_info.title}，总集数为：{total_episode}")
                     # 更新订阅信息
@@ -656,7 +666,7 @@ class Subscribe:
                     # 更新缺失季集
                     self.dbhelper.update_rss_tv_episodes(
                         rid=rssid, 
-                        episodes=range(total_episode - lack_episode + 1, total_episode + 1)
+                        episodes=new_lack_episodes
                     )
                     # 清除TMDB缓存
                     self.metahelper.delete_meta_data_by_tmdbid(media_info.tmdb_id)
