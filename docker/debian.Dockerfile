@@ -24,6 +24,9 @@ RUN set -xe && \
     if [ "$(uname -m)" = "x86_64" ]; then ARCH=amd64; elif [ "$(uname -m)" = "aarch64" ]; then ARCH=arm64; fi && \
     curl https://dl.min.io/client/mc/release/linux-${ARCH}/mc --create-dirs -o /usr/bin/mc && \
     chmod +x /usr/bin/mc && \
+    # yq (Debian 官方源没有该包，改为直接下载官方发布的静态二进制)
+    curl -L "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${ARCH}" -o /usr/bin/yq && \
+    chmod +x /usr/bin/yq && \
     # Pip requirements prepare
     apt-get install -y build-essential && \
     # Pip requirements
