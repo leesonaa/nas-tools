@@ -248,6 +248,7 @@ class Torrent:
                 target[title][index]["episodes"] = target_episodes
                 continue
             target_episodes = list(set(target_info.get("episodes")).intersection(set(source_info.get("episodes"))))
+            target_episodes.sort()
             target[title][index]["episodes"] = target_episodes
         return target
 
