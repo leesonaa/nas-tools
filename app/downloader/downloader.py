@@ -267,7 +267,8 @@ class Downloader:
                  in_from=None,
                  user_name=None,
                  skip_size_check=False,
-                 proxy=None):
+                 proxy=None,
+                 notify=True):
         """
         添加下载任务，根据当前使用的下载器分别调用不同的客户端处理
         :param media_info: 需下载的媒体信息，含URL地址
@@ -283,6 +284,8 @@ class Downloader:
         :param user_name: 用户名
         :param skip_size_check: 跳过尺寸检查，用于刷流部分下载
         :param proxy: 是否使用代理，指定该选项为 True/False 会覆盖 site_info 的设置
+        :param notify: 是否触发下载事件/发送下载消息，用于先探测（如磁力元数据解析）
+                       再决定是否真正保留任务的场景，探测阶段应传 False 避免虚假通知
         :return: 下载器类型, 种子ID，错误信息
         """
 
@@ -298,15 +301,16 @@ class Downloader:
                 self.message.send_download_fail_message(media_info, f"添加下载任务失败：{msg}")
 
         # 触发下载事件
-        self.eventmanager.send_event(EventType.DownloadAdd, {
-            "media_info": media_info.to_dict(),
-            "is_paused": is_paused,
-            "tag": tag,
-            "download_dir": download_dir,
-            "download_setting": download_setting,
-            "downloader_id": downloader_id,
-            "torrent_file": torrent_file
-        })
+        if notify:
+            self.eventmanager.send_event(EventType.DownloadAdd, {
+                "media_info": media_info.to_dict(),
+                "is_paused": is_paused,
+                "tag": tag,
+                "download_dir": download_dir,
+                "download_setting": download_setting,
+                "downloader_id": downloader_id,
+                "torrent_file": torrent_file
+            })
 
         # 标题
         title = media_info.org_string
@@ -525,7 +529,7 @@ class Downloader:
                         )
                     )
                 # 发送下载消息
-                if in_from:
+                if in_from and notify:
                     media_info.user_name = user_name
                     self.message.send_download_message(in_from=in_from,
                                                        can_item=media_info,
@@ -540,6 +544,37 @@ class Downloader:
             __download_fail(str(e))
             log.error(f"【Downloader】下载器 {downloader_name} 添加任务出错：%s" % str(e))
             return None, None, None, str(e)
+
+    def notify_download_started(self, in_from, media_info, downloader_id=None, download_setting=None,
+                                user_name=None):
+        """
+        补发"开始下载"事件及消息，用于 download() 以 notify=False 静默添加任务
+        （如磁力链接需要先探测元数据、确认真正需要后）确认保留任务后再通知，
+        避免探测阶段的任务被判定不需要、删除后仍误报"开始下载"
+        """
+        if not in_from:
+            return
+        if download_setting == "-2":
+            download_attr = {}
+        elif download_setting:
+            download_attr = self.get_download_setting(download_setting) \
+                            or self.get_download_setting(self.default_download_setting_id)
+        else:
+            download_attr = self.get_download_setting(self.default_download_setting_id)
+        download_setting_name = (download_attr or {}).get("name")
+        downloader_conf = self.get_downloader_conf(downloader_id)
+        downloader_name = downloader_conf.get("name") if downloader_conf else None
+        self.eventmanager.send_event(EventType.DownloadAdd, {
+            "media_info": media_info.to_dict(),
+            "is_paused": False,
+            "download_setting": download_setting,
+            "downloader_id": downloader_id
+        })
+        media_info.user_name = user_name
+        self.message.send_download_message(in_from=in_from,
+                                           can_item=media_info,
+                                           download_setting_name=download_setting_name,
+                                           downloader_name=downloader_name)
 
     def transfer(self, downloader_id=None):
         """
@@ -735,7 +770,7 @@ class Downloader:
         # 返回按季、集数倒序排序的列表
         download_list = Torrent().get_download_list(media_list, self._download_order)
 
-        def __download(download_item, torrent_file=None, tag=None, is_paused=None):
+        def __download(download_item, torrent_file=None, tag=None, is_paused=None, notify=True):
             """
             下载及发送通知
             """
@@ -747,7 +782,8 @@ class Downloader:
                 tag=tag,
                 is_paused=is_paused,
                 in_from=in_from,
-                user_name=user_name)
+                user_name=user_name,
+                notify=notify)
             if did:
                 if download_item not in return_items:
                     return_items.append(download_item)
@@ -779,7 +815,7 @@ class Downloader:
                     need_tvs.pop(tmdbid)
             return need
 
-        def __wait_magnet_files(downloader_id, download_id, retries=6, interval=5):
+        def __wait_magnet_files(downloader_id, download_id, retries=10, interval=6):
             """
             磁力链接添加后没有文件清单，需要等待下载器解析出元数据（拿到 peer/DHT 数据）
             后才能读到种子内的文件列表，轮询等待，超时则放弃
@@ -936,7 +972,8 @@ class Downloader:
                                 # 只能先暂停添加，等下载器解析出元数据后再判断种子里是否包含需要的集，
                                 # 常见于全集资源发布后分集资源不再更新、订阅卡在缺集状态的场景
                                 downloader_id, download_id = __download(download_item=item,
-                                                                        is_paused=True)
+                                                                        is_paused=True,
+                                                                        notify=False)
                                 if not download_id:
                                     continue
                                 torrent_files = __wait_magnet_files(downloader_id, download_id)
@@ -986,6 +1023,14 @@ class Downloader:
                             log.info("【Downloader】%s 开始下载 " % item.org_string)
                             self.start_torrents(ids=download_id,
                                                 downloader_id=downloader_id)
+                            if is_magnet:
+                                # 磁力探测阶段是静默添加（notify=False），确认真正保留任务后在这里补发
+                                # "开始下载"通知，避免探测被判定不需要、删种后仍误报已开始下载
+                                self.notify_download_started(in_from=in_from,
+                                                             media_info=item,
+                                                             downloader_id=downloader_id,
+                                                             download_setting=item.download_setting,
+                                                             user_name=user_name)
                             # 记录下载项
                             return_items.append(item)
                 index += 1
