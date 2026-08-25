@@ -1017,11 +1017,26 @@ class Downloader:
                                 magnet_hash = __extract_magnet_hash(item.enclosure)
                                 probe_downloader_id = __resolve_downloader_id(item)
                                 existing_torrent = None
-                                if magnet_hash and probe_downloader_id:
+                                if magnet_hash:
+                                    # downloader_id 传 None 时 get_torrents() 自己会兜底用默认
+                                    # 下载器查询，这里不需要再额外要求 probe_downloader_id 非空——
+                                    # 之前多加的这层判断曾经导致解析不出明确 downloader_id 时直接
+                                    # 跳过查询，误判成"种子不存在"，结果对一个其实已经在下载器里的
+                                    # 种子又走了一遍"新增"，而 qBittorrent 对已存在的种子的添加请求
+                                    # 会静默忽略这次传入的新参数（包括 stop_condition/is_stopped），
+                                    # 白设置了
                                     existing_list = self.get_torrents(ids=[magnet_hash],
                                                                       downloader_id=probe_downloader_id)
                                     if existing_list:
                                         existing_torrent = existing_list[0]
+                                        # 用查询返回的下载器口径为准，跟 probe_downloader_id 是否
+                                        # 解析成功无关
+                                        if not probe_downloader_id:
+                                            probe_downloader_id = self.default_downloader_id
+                                    else:
+                                        log.debug("【Downloader】按 info-hash %s 未查到已存在的种子"
+                                                 "（downloader_id=%s），将新增任务..."
+                                                 % (magnet_hash, probe_downloader_id))
                                 if existing_torrent is not None:
                                     # 已经加过（可能是上一轮遗留的）：先看现在有没有解析出文件清单，
                                     # 不重新添加、不清零进度。注意这里不能无脑先 start_torrents 再
