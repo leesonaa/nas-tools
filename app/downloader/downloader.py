@@ -995,12 +995,16 @@ class Downloader:
                             if is_magnet:
                                 # 磁力链接没有文件清单可供预读（种子内容需连上 DHT/Peer 才能解析），
                                 # 元数据解析所需时间不可控（可能几秒，也可能远超一次订阅检索的等待
-                                # 窗口）。之前的实现是等一个固定时长、超时就删种重来，结果是每一轮
-                                # 都在种子快解析完时把它杀掉、下一轮又从零开始，永远给不到它真正解析
-                                # 完成的机会。现在改成：按磁力链接自带的 info-hash 直接查下载器里有
-                                # 没有这个种子——有就直接看它现在解析出文件清单没有，不重新添加、不
-                                # 清零进度；没有就加一个暂停任务，只做一次很短的快速探测；不管哪种
-                                # 情况，只要还没解析出来就先跳过留给下一轮，让它在后台继续尝试。
+                                # 窗口）。之前两版实现分别踩了两个坑：一是等一个固定时长、超时就删种
+                                # 重来，导致种子永远没机会真正解析完成；二是以为"暂停添加"也能正常
+                                # 解析元数据——实测证明不是这样，libtorrent 对一个从一开始就是暂停
+                                # 状态的种子根本不会发起任何网络活动（连 DHT announce 都不会做），
+                                # 之前误以为暂停不影响解析，是因为参照的例子本身之前被启动过。
+                                # 现在改成：按磁力链接自带的 info-hash 直接查下载器里有没有这个种子；
+                                # 有就先确保它是运行状态（万一是旧逻辑遗留的暂停种子，顺手唤醒），
+                                # 再看现在解析出文件清单没有，不重新添加、不清零进度；没有就以运行
+                                # 状态新加一个任务，只做一次很短的快速探测；不管哪种情况，只要还没
+                                # 解析出来就先跳过留给下一轮，让它在后台继续跑着尝试，而不是删掉。
                                 magnet_hash = __extract_magnet_hash(item.enclosure)
                                 probe_downloader_id = __resolve_downloader_id(item)
                                 existing_torrent = None
@@ -1011,18 +1015,20 @@ class Downloader:
                                         existing_torrent = existing_list[0]
                                 if existing_torrent is not None:
                                     downloader_id, download_id = probe_downloader_id, magnet_hash
+                                    # 万一是旧版本遗留下来的暂停种子，先确保它处于运行状态才可能
+                                    # 真正去解析元数据；已经在跑的种子重复调用这个没有副作用
+                                    self.start_torrents(ids=download_id, downloader_id=downloader_id)
                                     torrent_files = self.get_files(tid=download_id,
                                                                    downloader_id=downloader_id)
                                 else:
                                     downloader_id, download_id = __download(download_item=item,
-                                                                            is_paused=True,
+                                                                            is_paused=False,
                                                                             notify=False)
                                     if not download_id:
                                         continue
-                                    # 只做一次很短的快速探测（多数健康种子几秒内就能拿到元数据），
-                                    # 拿不到不删种，留给下一轮订阅检索时凭 info-hash 再确认一次
+                                    # 现在是以运行状态添加的，真的会去连 DHT/Peer，多等一会更划算
                                     torrent_files = __wait_magnet_files(downloader_id, download_id,
-                                                                        retries=3, interval=3)
+                                                                        retries=4, interval=5)
                                 if not torrent_files:
                                     added_on = existing_torrent.get("added_on") if existing_torrent else None
                                     if added_on and (time.time() - added_on) > 7200:
