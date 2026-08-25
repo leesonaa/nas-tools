@@ -1017,6 +1017,8 @@ class Downloader:
                                 magnet_hash = __extract_magnet_hash(item.enclosure)
                                 probe_downloader_id = __resolve_downloader_id(item)
                                 existing_torrent = None
+                                log.info("【Downloader】%s 解析出 info-hash：%s，探测下载器：%s"
+                                        % (item.org_string, magnet_hash, probe_downloader_id))
                                 if magnet_hash:
                                     # downloader_id 传 None 时 get_torrents() 自己会兜底用默认
                                     # 下载器查询，这里不需要再额外要求 probe_downloader_id 非空——
@@ -1033,10 +1035,16 @@ class Downloader:
                                         # 解析成功无关
                                         if not probe_downloader_id:
                                             probe_downloader_id = self.default_downloader_id
+                                        log.info("【Downloader】按 info-hash %s 查到已存在的种子（hash=%s，"
+                                                "progress=%s，state=%s），复用而不新增..."
+                                                % (magnet_hash,
+                                                   existing_torrent.get("hash"),
+                                                   existing_torrent.get("progress"),
+                                                   existing_torrent.get("state")))
                                     else:
-                                        log.debug("【Downloader】按 info-hash %s 未查到已存在的种子"
-                                                 "（downloader_id=%s），将新增任务..."
-                                                 % (magnet_hash, probe_downloader_id))
+                                        log.info("【Downloader】按 info-hash %s 未查到已存在的种子"
+                                                "（downloader_id=%s），将新增任务..."
+                                                % (magnet_hash, probe_downloader_id))
                                 if existing_torrent is not None:
                                     # 已经加过（可能是上一轮遗留的）：先看现在有没有解析出文件清单，
                                     # 不重新添加、不清零进度。注意这里不能无脑先 start_torrents 再
@@ -1047,6 +1055,8 @@ class Downloader:
                                     downloader_id, download_id = probe_downloader_id, magnet_hash
                                     torrent_files = self.get_files(tid=download_id,
                                                                    downloader_id=downloader_id)
+                                    log.info("【Downloader】已存在种子 %s 当前已读到 %s 个文件"
+                                            % (download_id, len(torrent_files) if torrent_files else 0))
                                     if not torrent_files:
                                         self.start_torrents(ids=download_id, downloader_id=downloader_id)
                                 else:
@@ -1090,6 +1100,8 @@ class Downloader:
                                 torrent_episodes, torrent_path = self.get_torrent_episodes(
                                     url=item.enclosure,
                                     page_url=item.page_url)
+                            log.info("【Downloader】%s 种子内识别到集数：%s，当前仍需集数：%s"
+                                    % (item.org_string, sorted(torrent_episodes), sorted(need_episodes)))
                             selected_episodes = set(torrent_episodes).intersection(set(need_episodes))
                             if not selected_episodes:
                                 log.info("【Downloader】%s 没有需要的集，跳过..." % item.org_string)
@@ -1113,10 +1125,14 @@ class Downloader:
                                                               seq=index,
                                                               current=selected_episodes)
                             # 设置任务只下载想要的文件
-                            log.info("【Downloader】从 %s 中选取集：%s" % (item.org_string, selected_episodes))
-                            self.set_files_status(tid=download_id,
-                                                  need_episodes=selected_episodes,
-                                                  downloader_id=downloader_id)
+                            log.info("【Downloader】从 %s 中选取集：%s，即将设置文件优先级 "
+                                    "downloader_id=%s download_id=%s" % (
+                                        item.org_string, selected_episodes, downloader_id, download_id))
+                            set_result = self.set_files_status(tid=download_id,
+                                                               need_episodes=selected_episodes,
+                                                               downloader_id=downloader_id)
+                            log.info("【Downloader】%s 文件优先级设置完成，实际命中集数：%s"
+                                    % (item.org_string, set_result))
                             # 重新开始任务
                             log.info("【Downloader】%s 开始下载 " % item.org_string)
                             self.start_torrents(ids=download_id,
@@ -1329,11 +1345,16 @@ class Downloader:
         _client = self.__get_client(downloader_id)
         downloader_conf = self.get_downloader_conf(downloader_id)
         if not _client:
+            log.warn(f"【Downloader】set_files_status 未获取到下载器实例，downloader_id={downloader_id}")
             return []
         # 种子文件
         torrent_files = self.get_files(tid=tid, downloader_id=downloader_id)
         if not torrent_files:
+            log.warn(f"【Downloader】set_files_status 未读取到种子 {tid} 的文件列表，"
+                     f"无法设置文件优先级（need_episodes={need_episodes}）")
             return []
+        log.info(f"【Downloader】set_files_status 种子 {tid} 共 {len(torrent_files)} 个文件，"
+                 f"目标集数：{need_episodes}")
         if downloader_conf.get("type") == "transmission":
             files_info = {}
             for torrent_file in torrent_files:
@@ -1350,8 +1371,14 @@ class Downloader:
                     files_info[tid] = {file_id: {'priority': 'normal', 'selected': selected}}
                 else:
                     files_info[tid][file_id] = {'priority': 'normal', 'selected': selected}
+                log.debug(f"【Downloader】文件 {file_name} 识别集数：{meta_info.get_episode_list()}，"
+                          f"是否下载：{selected}")
             if sucess_epidised and files_info:
-                _client.set_files(file_info=files_info)
+                ret = _client.set_files(file_info=files_info)
+                log.info(f"【Downloader】种子 {tid} 设置文件下载状态结果：{ret}，命中集数：{sucess_epidised}")
+            else:
+                log.warn(f"【Downloader】种子 {tid} 未能设置文件下载状态："
+                         f"sucess_epidised={sucess_epidised}，files_info是否为空={not files_info}")
         elif downloader_conf.get("type") == "qbittorrent":
             file_ids = []
             for torrent_file in torrent_files:
@@ -1363,8 +1390,16 @@ class Downloader:
                     file_ids.append(file_id)
                 else:
                     sucess_epidised = list(set(sucess_epidised).union(set(meta_info.get_episode_list())))
+                log.debug(f"【Downloader】文件 id={file_id} {file_name} 识别集数："
+                          f"{meta_info.get_episode_list()}，是否设为不下载：{file_id in file_ids}")
             if sucess_epidised and file_ids:
-                _client.set_files(torrent_hash=tid, file_ids=file_ids, priority=0)
+                ret = _client.set_files(torrent_hash=tid, file_ids=file_ids, priority=0)
+                log.info(f"【Downloader】种子 {tid} 设置 {len(file_ids)} 个文件为不下载，"
+                         f"命中集数：{sucess_epidised}，接口返回：{ret}")
+            else:
+                log.warn(f"【Downloader】种子 {tid} 未调用文件优先级设置接口："
+                         f"命中集数={sucess_epidised}，待排除文件数={len(file_ids)}"
+                         f"（两者都需非空才会调用，否则所有文件将保持默认优先级）")
         return sucess_epidised
 
     def get_download_dirs(self, setting=None):
