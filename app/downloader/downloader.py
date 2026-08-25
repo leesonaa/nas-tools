@@ -869,7 +869,11 @@ class Downloader:
                 file_name = torrent_file.get("name")
                 if not file_name or os.path.splitext(file_name)[-1] not in RMT_MEDIAEXT:
                     continue
-                meta = MetaInfo(file_name)
+                # 只用文件名本身识别集数，不能把带目录的完整相对路径传进去——
+                # 种子的父文件夹名里常带“第01-05集”这类范围描述，一旦跟着文件名
+                # 一起解析，会被误判成集数范围，把每一个文件都识别成同样的范围，
+                # 而不是各自文件名里真正的单集号（如 S01E04）
+                meta = MetaInfo(os.path.basename(file_name))
                 if not meta.begin_episode:
                     continue
                 episodes = list(set(episodes).union(set(meta.get_episode_list())))
@@ -1360,7 +1364,9 @@ class Downloader:
             for torrent_file in torrent_files:
                 file_id = torrent_file.get("id")
                 file_name = torrent_file.get("name")
-                meta_info = MetaInfo(file_name)
+                # 只用文件名本身识别集数，避免种子父文件夹名（如“第01-05集”）
+                # 污染单文件的集数解析，导致每个文件都被误判成同一个集数范围
+                meta_info = MetaInfo(os.path.basename(file_name))
                 if not meta_info.get_episode_list():
                     selected = False
                 else:
@@ -1384,7 +1390,9 @@ class Downloader:
             for torrent_file in torrent_files:
                 file_id = torrent_file.get("id")
                 file_name = torrent_file.get("name")
-                meta_info = MetaInfo(file_name)
+                # 只用文件名本身识别集数，避免种子父文件夹名（如“第01-05集”）
+                # 污染单文件的集数解析，导致每个文件都被误判成同一个集数范围
+                meta_info = MetaInfo(os.path.basename(file_name))
                 if not meta_info.get_episode_list() or not set(meta_info.get_episode_list()).issubset(
                         set(need_episodes)):
                     file_ids.append(file_id)
