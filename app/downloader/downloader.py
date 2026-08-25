@@ -269,7 +269,8 @@ class Downloader:
                  user_name=None,
                  skip_size_check=False,
                  proxy=None,
-                 notify=True):
+                 notify=True,
+                 stop_condition=None):
         """
         添加下载任务，根据当前使用的下载器分别调用不同的客户端处理
         :param media_info: 需下载的媒体信息，含URL地址
@@ -287,6 +288,10 @@ class Downloader:
         :param proxy: 是否使用代理，指定该选项为 True/False 会覆盖 site_info 的设置
         :param notify: 是否触发下载事件/发送下载消息，用于先探测（如磁力元数据解析）
                        再决定是否真正保留任务的场景，探测阶段应传 False 避免虚假通知
+        :param stop_condition: 仅 qBittorrent 支持，"MetadataReceived" 表示拿到元数据后自动
+                       停止，不会开始下载正片内容，用于磁力链接"先看有没有需要的文件再决定
+                       下哪些"的探测场景，避免种子在设置文件优先级之前就已经下了一部分不需要
+                       的内容
         :return: 下载器类型, 种子ID，错误信息
         """
 
@@ -476,7 +481,8 @@ class Downloader:
                                              download_limit=download_limit,
                                              ratio_limit=ratio_limit,
                                              seeding_time_limit=seeding_time_limit,
-                                             cookie=site_info.get("cookie"))
+                                             cookie=site_info.get("cookie"),
+                                             stop_condition=stop_condition)
                 if ret:
                     download_id = downloader.get_torrent_id_by_tag(torrent_tag)
                     http_sources = downloader_conf.get("config", {}).get("http_sources")
@@ -771,7 +777,8 @@ class Downloader:
         # 返回按季、集数倒序排序的列表
         download_list = Torrent().get_download_list(media_list, self._download_order)
 
-        def __download(download_item, torrent_file=None, tag=None, is_paused=None, notify=True):
+        def __download(download_item, torrent_file=None, tag=None, is_paused=None, notify=True,
+                       stop_condition=None):
             """
             下载及发送通知
             """
@@ -784,7 +791,8 @@ class Downloader:
                 is_paused=is_paused,
                 in_from=in_from,
                 user_name=user_name,
-                notify=notify)
+                notify=notify,
+                stop_condition=stop_condition)
             if did:
                 if download_item not in return_items:
                     return_items.append(download_item)
@@ -994,17 +1002,18 @@ class Downloader:
                             torrent_path = None
                             if is_magnet:
                                 # 磁力链接没有文件清单可供预读（种子内容需连上 DHT/Peer 才能解析），
-                                # 元数据解析所需时间不可控（可能几秒，也可能远超一次订阅检索的等待
-                                # 窗口）。之前两版实现分别踩了两个坑：一是等一个固定时长、超时就删种
-                                # 重来，导致种子永远没机会真正解析完成；二是以为"暂停添加"也能正常
-                                # 解析元数据——实测证明不是这样，libtorrent 对一个从一开始就是暂停
-                                # 状态的种子根本不会发起任何网络活动（连 DHT announce 都不会做），
-                                # 之前误以为暂停不影响解析，是因为参照的例子本身之前被启动过。
-                                # 现在改成：按磁力链接自带的 info-hash 直接查下载器里有没有这个种子；
-                                # 有就先确保它是运行状态（万一是旧逻辑遗留的暂停种子，顺手唤醒），
-                                # 再看现在解析出文件清单没有，不重新添加、不清零进度；没有就以运行
-                                # 状态新加一个任务，只做一次很短的快速探测；不管哪种情况，只要还没
-                                # 解析出来就先跳过留给下一轮，让它在后台继续跑着尝试，而不是删掉。
+                                # 元数据解析所需时间不可控。之前几版分别踩了三个坑：
+                                # 1) 等一个固定时长、超时就删种重来，种子永远没机会真正解析完成；
+                                # 2) 以为"暂停添加"也能正常解析元数据——实测证明不是这样，一个从
+                                #    一开始就是暂停状态的种子根本不会发起任何网络活动；
+                                # 3) 改成以运行状态添加后能解析出元数据了，但运行状态下 qB 会用
+                                #    默认优先级下载全部文件，等我们这边探测到、调用 set_files_status
+                                #    把不需要的文件设为不下载之前，那几秒到十几秒的窗口里已经把
+                                #    不需要的文件也下了一部分——相当于变相洗版了整个种子。
+                                # 现在用 qBittorrent 自带的 stop_condition="MetadataReceived"：
+                                # 让它以运行状态添加、真正去连 DHT/Peer，但一拿到元数据就自动停
+                                # 下来，根本不给它机会开始下正片内容，我们再在停下来之后设置文件
+                                # 优先级、重新启动，就不会有任何"来不及筛选就已经下多了"的窗口。
                                 magnet_hash = __extract_magnet_hash(item.enclosure)
                                 probe_downloader_id = __resolve_downloader_id(item)
                                 existing_torrent = None
@@ -1014,19 +1023,26 @@ class Downloader:
                                     if existing_list:
                                         existing_torrent = existing_list[0]
                                 if existing_torrent is not None:
+                                    # 已经加过（可能是上一轮遗留的）：先看现在有没有解析出文件清单，
+                                    # 不重新添加、不清零进度。注意这里不能无脑先 start_torrents 再
+                                    # 检查——如果它是旧版本遗留的、文件优先级还没收窄过的种子，
+                                    # 直接 resume 会重演同一个"来不及筛选就先下了"的问题；只有确认
+                                    # 文件清单还没解析出来（这种情况下继续跑不会多下任何东西，因为
+                                    # 都还不知道有哪些文件）时，才唤醒它继续尝试解析
                                     downloader_id, download_id = probe_downloader_id, magnet_hash
-                                    # 万一是旧版本遗留下来的暂停种子，先确保它处于运行状态才可能
-                                    # 真正去解析元数据；已经在跑的种子重复调用这个没有副作用
-                                    self.start_torrents(ids=download_id, downloader_id=downloader_id)
                                     torrent_files = self.get_files(tid=download_id,
                                                                    downloader_id=downloader_id)
+                                    if not torrent_files:
+                                        self.start_torrents(ids=download_id, downloader_id=downloader_id)
                                 else:
                                     downloader_id, download_id = __download(download_item=item,
                                                                             is_paused=False,
-                                                                            notify=False)
+                                                                            notify=False,
+                                                                            stop_condition="MetadataReceived")
                                     if not download_id:
                                         continue
-                                    # 现在是以运行状态添加的，真的会去连 DHT/Peer，多等一会更划算
+                                    # 只做一次很短的快速探测（多数健康种子几秒内就能拿到元数据），
+                                    # 拿不到不删种，留给下一轮订阅检索时凭 info-hash 再确认一次
                                     torrent_files = __wait_magnet_files(downloader_id, download_id,
                                                                         retries=4, interval=5)
                                 if not torrent_files:

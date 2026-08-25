@@ -444,7 +444,8 @@ class Qbittorrent(_IDownloadClient):
                     download_limit=None,
                     ratio_limit=None,
                     seeding_time_limit=None,
-                    cookie=None
+                    cookie=None,
+                    stop_condition=None
                     ):
         """
         添加种子
@@ -459,6 +460,10 @@ class Qbittorrent(_IDownloadClient):
         :param ratio_limit: 分享率限制
         :param seeding_time_limit: 做种时间限制
         :param cookie: 站点Cookie用于辅助下载种子
+        :param stop_condition: 自动开始后的停止条件，"MetadataReceived" 表示磁力链接刚解析出
+            元数据（拿到文件清单）就自动停止，不会开始下载正片内容——用于"先看种子里有没有
+            需要的文件，再决定下载哪些"的场景，避免种子在我们来得及设置文件优先级之前就已经
+            把不需要的文件也下了一部分
         :return: bool
         """
         self._last_torrent_id = None
@@ -518,11 +523,17 @@ class Qbittorrent(_IDownloadClient):
                 category = self.__check_category(save_path)
 
             # 添加下载
+            # 注意：这里传 is_stopped 而不是 is_paused ——qbittorrent-api 内部用
+            # `is_paused or is_stopped` 合并这两个同义参数，Python 的 or 在 is_paused=False
+            # 时会把它当假值继续看 is_stopped（我们没传，是 None），结果合并成 None（相当于
+            # "没有指定"），我们想要的"不暂停"这个明确指令就这样被静默吞掉了，qBittorrent只能
+            # 落回它自己服务端配置的默认行为。改传 is_stopped 就没有这个问题：
+            # is_stopped=False, is_paused=None(未传) -> None or False -> False，符合预期。
             qbc_ret = self.qbc.torrents_add(urls=urls,
                                             torrent_files=torrent_files,
                                             save_path=save_path,
                                             category=category,
-                                            is_paused=is_paused,
+                                            is_stopped=is_paused,
                                             tags=tags,
                                             content_layout=content_layout,
                                             upload_limit=upload_limit,
@@ -530,6 +541,7 @@ class Qbittorrent(_IDownloadClient):
                                             ratio_limit=ratio_limit,
                                             seeding_time_limit=seeding_time_limit,
                                             use_auto_torrent_management=is_auto,
+                                            stop_condition=stop_condition,
                                             cookie=cookie)
             if qbc_ret and str(qbc_ret).find("Ok") != -1:
                 self._last_torrent_id = self.__find_magnet_torrent(content)
