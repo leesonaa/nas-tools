@@ -13,7 +13,7 @@ from .mediaItem import MediaItem
 from app.utils import StringUtils
 from app.utils.types import MediaType
 from app.utils.tokens import Tokens
-        
+
 class MetaVideoV2(MetaBase):
 
     _media_item_title = None
@@ -132,7 +132,7 @@ class MetaVideoV2(MetaBase):
         # 去掉名字中不需要的干扰字符，过短的纯数字不要
         self.cn_name = self.__fix_name(self.cn_name)
         self.en_name = StringUtils.str_title(self.__fix_name(self.en_name))
-        
+
         # 处理part
         if StringUtils.is_string_and_not_empty(self.part) and self.part.upper() == "PART":
             self.part = None
@@ -147,7 +147,7 @@ class MetaVideoV2(MetaBase):
         media_type = self._media_item_title.main.media_type if self._media_item_title.main.media_type else self._media_item_subtitle.main.media_type
         if StringUtils.is_string_and_not_empty(media_type):
             self.type = MediaType.MOVIE if media_type.lower() == "movie" else MediaType.TV
-            self.media_type = MediaType.MOVIE if media_type.lower() == "movie" else MediaType.TV  
+            self.media_type = MediaType.MOVIE if media_type.lower() == "movie" else MediaType.TV
         else:
             self.type = MediaType.MOVIE
             self.media_type = MediaType.MOVIE
@@ -230,12 +230,26 @@ class MetaVideoV2(MetaBase):
             title_episodes = sorted(title_episodes)
             self.begin_episode = title_episodes[0]
             self.end_episode = title_episodes[-1]
-            self.total_episodes = len(title_episodes) if not title_episodes_count else title_episodes_count
+            if title_episodes_count:
+                self.total_episodes = title_episodes_count
+            elif len(title_episodes) == 2 and self.end_episode != self.begin_episode:
+                # "第X-Y集"这类范围写法在这里只会拿到两个边界数字（如[24, 30]），
+                # 不是展开后的完整集数列表，len() 算出来的是"边界数量"（恒为2），
+                # 不是范围实际覆盖的集数，要用 end-begin+1 才是真正的总集数
+                self.total_episodes = self.end_episode - self.begin_episode + 1
+            else:
+                self.total_episodes = len(title_episodes)
         elif not self.__is_digit_array(title_episodes) and self.__is_digit_array(subltitle_episodes):
             subltitle_episodes = sorted(subltitle_episodes)
             self.begin_episode = subltitle_episodes[0]
             self.end_episode = subltitle_episodes[-1]
-            self.total_episodes = len(subltitle_episodes) if not subltitle_episodes_count else subltitle_episodes_count
+            if subltitle_episodes_count:
+                self.total_episodes = subltitle_episodes_count
+            elif len(subltitle_episodes) == 2 and self.end_episode != self.begin_episode:
+                # 同上，副标题里的范围写法也是同样的坑
+                self.total_episodes = self.end_episode - self.begin_episode + 1
+            else:
+                self.total_episodes = len(subltitle_episodes)
         else:
             if StringUtils.is_string_and_not_empty(title_episodes) or self.__is_digit(title_episodes):
                 self.begin_episode = title_episodes
@@ -385,7 +399,7 @@ class MetaVideoV2(MetaBase):
             elif StringUtils.is_string_and_not_empty(subltitle_video_encodes):
                 self.video_encode = subltitle_video_encodes
             else:
-                self.video_encode = None 
+                self.video_encode = None
 
         title_video_color_depths = self._media_item_title.video.color_depth
         subltitle_video_color_depths = self._media_item_subtitle.video.color_depth
@@ -820,7 +834,7 @@ class MetaVideoV2(MetaBase):
 
         if self.begin_episode and self.end_episode and self.begin_episode == self.end_episode:
             self.end_episode = None
-            
+
         if self.begin_season and self.end_season and self.begin_season != self.end_season:
             self.begin_episode = None
             self.end_episode = None
