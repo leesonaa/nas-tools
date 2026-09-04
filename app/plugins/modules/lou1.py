@@ -1,7 +1,10 @@
 import json
 import re
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urljoin, urlparse
 
+import requests
 from bs4 import BeautifulSoup
 
 from app.indexer.indexerConf import IndexerConf
@@ -30,7 +33,13 @@ class Lou1(_IPluginModule):
     _mirror_domains = ["https://www.1lou.me", "https://1lou.vip"]
     # 搜索接口固定用这个（目前只确认 www.1lou.me 有这个 JSON 接口）
     _search_api = "https://www.1lou.me/search/api/search.php"
+    # 详情页并发抓取数，调太高容易被站点风控识别为异常流量
+    _detail_concurrency = 3
+    # 每提交一个并发请求错开的间隔（秒），进一步压低瞬时并发压力
+    _detail_stagger = 0.2
     _ua = None
+    # 详情页请求复用同一个连接池（keep-alive），省掉重复握手开销，不会增加对站点的请求数
+    _session = None
 
     @staticmethod
     def get_fields():
@@ -63,6 +72,17 @@ class Lou1(_IPluginModule):
                     ],
                     [
                         {
+                            'title': '详情页并发数',
+                            'required': "",
+                            'tooltip': '同时抓取详情页的线程数，调太高容易被站点风控识别为异常流量，默认3',
+                            'type': 'text',
+                            'content': [
+                                {'id': 'detail_concurrency', 'placeholder': '3'}
+                            ]
+                        }
+                    ],
+                    [
+                        {
                             'title': '启用',
                             'required': "",
                             'type': 'switch',
@@ -80,8 +100,18 @@ class Lou1(_IPluginModule):
                 d.strip().rstrip("/") for d in domains_str.split(",") if d.strip()
             ]
             self._search_api = config.get("search_api") or self._search_api
+            try:
+                self._detail_concurrency = max(1, int(config.get("detail_concurrency") or self._detail_concurrency))
+            except (TypeError, ValueError):
+                pass
             self._enable = config.get("enable")
         self._ua = Config().get_ua()
+        self._session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=self._detail_concurrency, pool_maxsize=self._detail_concurrency
+        )
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
         if self._enable:
             self.__register_sites_with_proxy()
 
@@ -171,7 +201,8 @@ class Lou1(_IPluginModule):
             self.warn(f"【{self.module_name}】{indexer.name} 未搜索到数据")
             return []
 
-        results = []
+        # 详情页请求耗时占大头，先筛出有效帖子再并发抓取，避免逐条串行等待
+        pending_hits = []
         for hit in hits:
             # 没有附件的帖子（比如简介占位帖）直接跳过，不用浪费一次详情页请求
             if not hit.get("files"):
@@ -180,28 +211,40 @@ class Lou1(_IPluginModule):
             if not thread_path or thread_path in seen_threads:
                 continue
             seen_threads.add(thread_path)
-            try:
-                enclosure, size, page_url = self.__parse_detail(thread_path)
-                if not enclosure:
-                    continue
-                results.append({
-                    "indexer_id": indexer.id,
-                    "indexer": indexer.name,
-                    "title": self.__normalize_title(hit.get("subject", "")),
-                    "enclosure": enclosure,
-                    "description": "",
-                    "size": size or 0,
-                    "seeders": 0,
-                    "peers": 0,
-                    "freeleech": False,
-                    "downloadvolumefactor": 1.0,
-                    "uploadvolumefactor": 1.0,
-                    "page_url": page_url,
-                    "imdbid": "",
-                })
-            except Exception as e:
-                ExceptionUtils.exception_traceback(e)
-                continue
+            pending_hits.append(hit)
+
+        results = []
+        if pending_hits:
+            with ThreadPoolExecutor(max_workers=min(self._detail_concurrency, len(pending_hits))) as executor:
+                future_to_hit = {}
+                for hit in pending_hits:
+                    future_to_hit[executor.submit(self.__parse_detail, hit.get("thread_url", ""))] = hit
+                    # 错开提交时间，避免瞬时并发全部命中同一时刻
+                    time.sleep(self._detail_stagger)
+                for future in as_completed(future_to_hit):
+                    hit = future_to_hit[future]
+                    try:
+                        enclosure, size, page_url = future.result()
+                    except Exception as e:
+                        ExceptionUtils.exception_traceback(e)
+                        continue
+                    if not enclosure:
+                        continue
+                    results.append({
+                        "indexer_id": indexer.id,
+                        "indexer": indexer.name,
+                        "title": self.__normalize_title(hit.get("subject", "")),
+                        "enclosure": enclosure,
+                        "description": "",
+                        "size": size or 0,
+                        "seeders": 0,
+                        "peers": 0,
+                        "freeleech": False,
+                        "downloadvolumefactor": 1.0,
+                        "uploadvolumefactor": 1.0,
+                        "page_url": page_url,
+                        "imdbid": "",
+                    })
 
         if results:
             self.warn(f"【{self.module_name}】{indexer.name} 共查询 {total or len(hits)} 条，返回附件数据：{len(results)}")
@@ -261,7 +304,7 @@ class Lou1(_IPluginModule):
             page_url = urljoin(domain + "/", thread_path.lstrip("/"))
             try:
                 resp = RequestUtils(
-                    headers=self._headers(), proxies=self._proxies(), timeout=10
+                    headers=self._headers(), proxies=self._proxies(), session=self._session, timeout=10
                 ).get_res(url=page_url)
             except Exception as e:
                 last_error = e
@@ -270,7 +313,7 @@ class Lou1(_IPluginModule):
                 continue
 
             resp.encoding = resp.apparent_encoding or "utf-8"
-            soup = BeautifulSoup(resp.text, "html.parser")
+            soup = BeautifulSoup(resp.text, "lxml")
             attach_tag = soup.find("a", href=re.compile(r"attach-download-\d+\.htm"))
             if not attach_tag:
                 # 主域名内容异常时继续尝试备用镜像。
