@@ -1,7 +1,10 @@
 import json
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import unescape
 from urllib.parse import urlparse
+
+import requests
 
 from app.indexer.indexerConf import IndexerConf
 from app.plugins.modules._base import _IPluginModule
@@ -15,7 +18,7 @@ class Btl(_IPluginModule):
     module_desc = "让内建索引器支持检索不太灵影视资源（支持全分页磁力链接）"
     module_icon = "btl.png"
     module_color = "#0EA5E9"
-    module_version = "0.1"
+    module_version = "0.2"
     module_author = "leeson"
     author_url = ""
     module_config_prefix = "btl_"
@@ -24,11 +27,20 @@ class Btl(_IPluginModule):
 
     _enable = False
     _domain = "https://web5.mukaku.com"
-    _api_url = "https://web5.mukaku.com/prod/api/v1/getVideoList"
-    _detail_url = "https://web5.mukaku.com/prod/api/v1/getVideoDetail"
+    # getVideoDetail 已被站点加了 VIP 限制（need_vip），拿不到磁力；
+    # getTList（首页"最新资源列表"接口）不受此限制，且列表数据里直接带 zlink，改用这个
+    _tlist_url = "https://web5.mukaku.com/prod/api/v1/getTList"
     _app_id = "83768d9ad4"
     _identity = "23734adac0301bccdcb107c4aa21f96c"
+    # 站点分类：1=电影 2=电视剧，getTList 不支持关键字搜索，只能挨个分类翻页后本地匹配标题
+    _tlist_categories = (1, 2)
+    # 站点固定每页返回 20 条，total 固定 400，即每个分类最多 20 页
+    _tlist_page_size = 20
+    # 并发翻页数，调太高容易被站点风控识别为异常流量
+    _tlist_concurrency = 5
     _ua = None
+    # 复用同一个连接池（keep-alive），省掉重复握手开销
+    _session = None
 
     @staticmethod
     def get_fields():
@@ -48,12 +60,23 @@ class Btl(_IPluginModule):
                     ],
                     [
                         {
-                            "title": "API地址",
+                            "title": "列表接口地址",
                             "required": "required",
                             "tooltip": "一般不用修改，站点更换域名时需要同步修改",
                             "type": "text",
                             "content": [
-                                {"id": "api_url", "placeholder": "https://web5.mukaku.com/prod/api/v1/getVideoList"}
+                                {"id": "tlist_url", "placeholder": "https://web5.mukaku.com/prod/api/v1/getTList"}
+                            ],
+                        }
+                    ],
+                    [
+                        {
+                            "title": "翻页并发数",
+                            "required": "",
+                            "tooltip": "同时翻页拉取列表的线程数，调太高容易被站点风控识别为异常流量，默认5",
+                            "type": "text",
+                            "content": [
+                                {"id": "tlist_concurrency", "placeholder": "5"}
                             ],
                         }
                     ],
@@ -72,9 +95,19 @@ class Btl(_IPluginModule):
     def init_config(self, config=None):
         if config:
             self._domain = (config.get("domain") or self._domain).rstrip("/")
-            self._api_url = config.get("api_url") or self._api_url
+            self._tlist_url = config.get("tlist_url") or self._tlist_url
+            try:
+                self._tlist_concurrency = max(1, int(config.get("tlist_concurrency") or self._tlist_concurrency))
+            except (TypeError, ValueError):
+                pass
             self._enable = config.get("enable")
         self._ua = Config().get_ua()
+        self._session = requests.Session()
+        adapter = requests.adapters.HTTPAdapter(
+            pool_connections=self._tlist_concurrency, pool_maxsize=self._tlist_concurrency
+        )
+        self._session.mount("http://", adapter)
+        self._session.mount("https://", adapter)
         if self._enable:
             self.__register_site_with_proxy()
 
@@ -143,79 +176,6 @@ class Btl(_IPluginModule):
         except Exception:
             return 0
 
-    def search(self, indexer, keyword, page=0):
-        if not indexer or not keyword:
-            return []
-
-        page_no = 1
-        page_size = 35
-        total = 0
-        results = []
-        seen_links = set()
-        while True:
-            entries, page_total, page_limit = self.__search_api(keyword, page_no, page_size)
-            if not entries:
-                break
-            total = page_total or total
-            page_size = page_limit or page_size
-            for entry in entries:
-                if not self.__entry_matches_keyword(entry, keyword):
-                    self.warn(
-                        f"【{self.module_name}】跳过非同名影视条目：{entry.get('title', '')}"
-                    )
-                    continue
-                detail = self.__get_detail(entry.get("doub_id") or entry.get("idcode"))
-                if not self.__detail_matches_entry(entry, detail):
-                    self.warn(
-                        f"【{self.module_name}】跳过标题不一致的详情："
-                        f"{entry.get('title', '')} -> {detail.get('title', '')}"
-                    )
-                    continue
-                for torrent in self.__extract_torrents(detail):
-                    enclosure = torrent.get("zlink") or torrent.get("magnet") or ""
-                    if not enclosure.lower().startswith("magnet:") or enclosure in seen_links:
-                        continue
-                    seen_links.add(enclosure)
-                    title = torrent.get("zname") or entry.get("title") or ""
-                    if not title:
-                        continue
-                    results.append(
-                        {
-                            "indexer_id": indexer.id,
-                            "indexer": indexer.name,
-                            "title": self.__normalize_title(title),
-                            "enclosure": enclosure,
-                            "description": torrent.get("conta") or entry.get("abstract") or "",
-                            "size": self.__parse_size(torrent.get("zsize") or torrent.get("ezsize")),
-                            "seeders": 0,
-                            "peers": 0,
-                            "freeleech": False,
-                            "downloadvolumefactor": 1.0,
-                            "uploadvolumefactor": 1.0,
-                            "page_url": self._domain,
-                            "imdbid": entry.get("IMDB_number") or "",
-                        }
-                    )
-            if total and page_no * page_size >= total:
-                break
-            if len(entries) < page_size:
-                break
-            page_no += 1
-
-        if results:
-            self.warn(f"【{self.module_name}】{indexer.name} 共查询 {total or len(results)} 条，返回磁力数据：{len(results)}")
-        else:
-            self.warn(f"【{self.module_name}】{indexer.name} 未搜索到数据")
-        return results
-
-    @staticmethod
-    def __detail_matches_entry(entry, detail):
-        entry_title = Btl.__normalize_match_title(entry.get("title"))
-        detail_title = Btl.__normalize_match_title(detail.get("title"))
-        if not entry_title or not detail_title:
-            return False
-        return entry_title in detail_title or detail_title in entry_title
-
     @staticmethod
     def __normalize_match_title(title):
         title = unescape(str(title or "")).casefold()
@@ -226,9 +186,8 @@ class Btl(_IPluginModule):
         keyword = Btl.__normalize_match_title(keyword)
         if not keyword:
             return False
-        candidates = [entry.get("title"), entry.get("otitle")]
-        alias = entry.get("alias") or ""
-        candidates.extend(re.split(r"[,，/|、]", str(alias)))
+        # getTList 没有 otitle/alias 字段，只能拿剧名(title)和资源文件名(zname)来匹配
+        candidates = [entry.get("title"), entry.get("zname")]
         for candidate in candidates:
             candidate = Btl.__normalize_match_title(candidate)
             if not candidate:
@@ -239,70 +198,104 @@ class Btl(_IPluginModule):
                 return True
         return False
 
-    def __get_detail(self, video_id):
-        if not video_id:
-            return {}
+    def search(self, indexer, keyword, page=0):
+        if not indexer or not keyword:
+            return []
+
+        entries = self.__collect_tlist_entries()
+        if not entries:
+            self.warn(f"【{self.module_name}】{indexer.name} 未搜索到数据")
+            return []
+
+        results = []
+        seen_links = set()
+        for entry in entries:
+            if not self.__entry_matches_keyword(entry, keyword):
+                continue
+            enclosure = entry.get("zlink") or ""
+            if not enclosure.lower().startswith("magnet:") or enclosure in seen_links:
+                continue
+            seen_links.add(enclosure)
+            title = entry.get("zname") or entry.get("title") or ""
+            if not title:
+                continue
+            results.append(
+                {
+                    "indexer_id": indexer.id,
+                    "indexer": indexer.name,
+                    "title": self.__normalize_title(title),
+                    "enclosure": enclosure,
+                    "description": entry.get("conta") or "",
+                    "size": self.__parse_size(entry.get("zsize")),
+                    "seeders": 0,
+                    "peers": 0,
+                    "freeleech": False,
+                    "downloadvolumefactor": 1.0,
+                    "uploadvolumefactor": 1.0,
+                    "page_url": self._domain,
+                    "imdbid": "",
+                }
+            )
+
+        if results:
+            self.warn(f"【{self.module_name}】{indexer.name} 共查询 {len(entries)} 条，返回磁力数据：{len(results)}")
+        else:
+            self.warn(f"【{self.module_name}】{indexer.name} 未搜索到数据")
+        return results
+
+    def __collect_tlist_entries(self):
+        """
+        getTList 不支持关键字搜索，只能把"电影"、"电视剧"两个分类的全部分页拉完，
+        再本地按标题匹配关键字。先取每个分类第 1 页拿到 total，再并发拉剩余页。
+        """
+        entries = []
+        pending_pages = []
+        for category in self._tlist_categories:
+            page_list, total = self.__get_tlist_page(category, 1)
+            entries.extend(page_list)
+            if not total:
+                continue
+            total_pages = -(-total // self._tlist_page_size)
+            pending_pages.extend((category, p) for p in range(2, total_pages + 1))
+
+        if pending_pages:
+            with ThreadPoolExecutor(max_workers=min(self._tlist_concurrency, len(pending_pages))) as executor:
+                futures = [
+                    executor.submit(self.__get_tlist_page, category, p) for category, p in pending_pages
+                ]
+                for future in as_completed(futures):
+                    try:
+                        page_list, _ = future.result()
+                    except Exception as e:
+                        ExceptionUtils.exception_traceback(e)
+                        continue
+                    entries.extend(page_list)
+
+        return entries
+
+    def __get_tlist_page(self, category, page):
         params = {
             "app_id": self._app_id,
             "identity": self._identity,
-            "id": video_id,
-        }
-        try:
-            resp = RequestUtils(
-                headers=self._headers(), proxies=self._proxies(), timeout=20
-            ).get_res(url=self._detail_url, params=params)
-            if not resp or resp.status_code != 200:
-                return {}
-            data = resp.json()
-            return data.get("data") or {} if data.get("success") else {}
-        except Exception as e:
-            ExceptionUtils.exception_traceback(e)
-            return {}
-
-    @staticmethod
-    def __extract_torrents(detail):
-        torrents = detail.get("all_seeds") or []
-        if isinstance(torrents, list) and torrents:
-            return torrents
-        grouped_torrents = detail.get("ecca") or {}
-        if isinstance(grouped_torrents, dict):
-            torrents = []
-            for group in grouped_torrents.values():
-                if isinstance(group, list):
-                    torrents.extend(group)
-            if torrents:
-                return torrents
-        if detail.get("zlink"):
-            return [detail]
-        return []
-
-    def __search_api(self, keyword, page, page_size):
-        params = {
-            "app_id": self._app_id,
-            "identity": self._identity,
-            "sb": keyword,
+            "sc": category,
             "page": page,
-            "limit": page_size,
+            "limit": self._tlist_page_size,
         }
         try:
             resp = RequestUtils(
-                headers=self._headers(), proxies=self._proxies(), timeout=20
-            ).get_res(url=self._api_url, params=params)
+                headers=self._headers(), proxies=self._proxies(), session=self._session, timeout=15
+            ).get_res(url=self._tlist_url, params=params)
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
-            return [], 0, page_size
+            return [], 0
         if not resp or resp.status_code != 200:
-            return [], 0, page_size
+            return [], 0
         try:
             data = resp.json()
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
-            return [], 0, page_size
+            return [], 0
         if not data.get("success"):
-            return [], 0, page_size
+            return [], 0
         result_data = data.get("data") or {}
-        return (
-            result_data.get("data") or [],
-            result_data.get("total") or 0,
-            result_data.get("limit") or page_size,
-        )
+        return result_data.get("list") or [], result_data.get("total") or 0
