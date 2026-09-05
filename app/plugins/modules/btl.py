@@ -1,6 +1,5 @@
 import json
 import re
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import unescape
 from urllib.parse import urlparse
 
@@ -36,8 +35,10 @@ class Btl(_IPluginModule):
     _tlist_categories = (1, 2)
     # 站点固定每页返回 20 条，total 固定 400，即每个分类最多 20 页
     _tlist_page_size = 20
-    # 并发翻页数，调太高容易被站点风控识别为异常流量
+    # 连接池大小，翻页请求按顺序执行以便在找到首集后及时停止
     _tlist_concurrency = 5
+    # 接口允许超出 total 继续翻页，设置上限避免站点异常时无限请求
+    _tlist_max_pages = 500
     _ua = None
     # 复用同一个连接池（keep-alive），省掉重复握手开销
     _session = None
@@ -71,9 +72,9 @@ class Btl(_IPluginModule):
                     ],
                     [
                         {
-                            "title": "翻页并发数",
+                            "title": "请求连接数",
                             "required": "",
-                            "tooltip": "同时翻页拉取列表的线程数，调太高容易被站点风控识别为异常流量，默认5",
+                            "tooltip": "HTTP 请求连接池大小，默认5",
                             "type": "text",
                             "content": [
                                 {"id": "tlist_concurrency", "placeholder": "5"}
@@ -202,7 +203,7 @@ class Btl(_IPluginModule):
         if not indexer or not keyword:
             return []
 
-        entries = self.__collect_tlist_entries()
+        entries = self.__collect_tlist_entries(keyword)
         if not entries:
             self.warn(f"【{self.module_name}】{indexer.name} 未搜索到数据")
             return []
@@ -243,33 +244,52 @@ class Btl(_IPluginModule):
             self.warn(f"【{self.module_name}】{indexer.name} 未搜索到数据")
         return results
 
-    def __collect_tlist_entries(self):
+    @staticmethod
+    def __is_first_episode(entry, keyword):
+        if not Btl.__entry_matches_keyword(entry, keyword):
+            return False
+        title = " ".join(str(entry.get(field) or "") for field in ("title", "zname"))
+        return bool(
+            re.search(r"(?<![A-Z0-9])S0*1[\s._-]*E0*1(?![A-Z0-9])", title, re.IGNORECASE)
+            or re.search(r"(?<![A-Z0-9])1\s*[xX]\s*0*1(?![A-Z0-9])", title)
+            or re.search(r"第\s*0*1\s*[集话話]", title)
+        )
+
+    def __collect_tlist_entries(self, keyword):
         """
         getTList 不支持关键字搜索，只能把"电影"、"电视剧"两个分类的全部分页拉完，
-        再本地按标题匹配关键字。先取每个分类第 1 页拿到 total，再并发拉剩余页。
+        再本地按标题匹配关键字。站点虽然返回 total，但超过 total 仍可能有数据，
+        因此按页递增；找到当前剧集的 S01E01 后即可停止。
         """
         entries = []
-        pending_pages = []
-        for category in self._tlist_categories:
-            page_list, total = self.__get_tlist_page(category, 1)
-            entries.extend(page_list)
-            if not total:
-                continue
-            total_pages = -(-total // self._tlist_page_size)
-            pending_pages.extend((category, p) for p in range(2, total_pages + 1))
+        finished_categories = set()
+        page_signatures = {category: set() for category in self._tlist_categories}
 
-        if pending_pages:
-            with ThreadPoolExecutor(max_workers=min(self._tlist_concurrency, len(pending_pages))) as executor:
-                futures = [
-                    executor.submit(self.__get_tlist_page, category, p) for category, p in pending_pages
-                ]
-                for future in as_completed(futures):
-                    try:
-                        page_list, _ = future.result()
-                    except Exception as e:
-                        ExceptionUtils.exception_traceback(e)
-                        continue
-                    entries.extend(page_list)
+        for page in range(1, self._tlist_max_pages + 1):
+            for category in self._tlist_categories:
+                if category in finished_categories:
+                    continue
+                page_list, _ = self.__get_tlist_page(category, page)
+                if not page_list:
+                    finished_categories.add(category)
+                    continue
+
+                signature = tuple(
+                    entry.get("zlink") or entry.get("zname") or entry.get("title") or ""
+                    for entry in page_list
+                )
+                if signature and signature in page_signatures[category]:
+                    finished_categories.add(category)
+                    continue
+                if signature:
+                    page_signatures[category].add(signature)
+                entries.extend(page_list)
+
+                if any(self.__is_first_episode(entry, keyword) for entry in page_list):
+                    return entries
+
+            if len(finished_categories) == len(self._tlist_categories):
+                break
 
         return entries
 
