@@ -199,11 +199,12 @@ class Btl(_IPluginModule):
                 return True
         return False
 
-    def search(self, indexer, keyword, page=0):
+    def search(self, indexer, keyword, page=0, filter_args=None):
         if not indexer or not keyword:
             return []
 
-        entries = self.__collect_tlist_entries(keyword)
+        target_season, target_episode = self.__get_target_episode(filter_args)
+        entries = self.__collect_tlist_entries(keyword, target_season, target_episode)
         if not entries:
             self.warn(f"【{self.module_name}】{indexer.name} 未搜索到数据")
             return []
@@ -245,21 +246,37 @@ class Btl(_IPluginModule):
         return results
 
     @staticmethod
-    def __is_first_episode(entry, keyword):
+    def __get_target_episode(filter_args):
+        """
+        取订阅缺失的最早一集作为翻页停止目标：缺失从 E06 开始就只需翻到 E06，
+        不必像补全第一季那样一直翻到 E01；filter_args 缺失或为电影时不设目标。
+        """
+        if not filter_args:
+            return None, None
+        seasons = filter_args.get("season")
+        if not seasons:
+            return None, None
+        episodes = filter_args.get("episode")
+        target_season = min(s for s in seasons if s is not None)
+        target_episode = min((e for e in episodes if e is not None), default=1) if episodes else 1
+        return target_season, target_episode
+
+    @staticmethod
+    def __is_target_episode(entry, keyword, season, episode):
         if not Btl.__entry_matches_keyword(entry, keyword):
             return False
         title = " ".join(str(entry.get(field) or "") for field in ("title", "zname"))
         return bool(
-            re.search(r"(?<![A-Z0-9])S0*1[\s._-]*E0*1(?![A-Z0-9])", title, re.IGNORECASE)
-            or re.search(r"(?<![A-Z0-9])1\s*[xX]\s*0*1(?![A-Z0-9])", title)
-            or re.search(r"第\s*0*1\s*[集话話]", title)
+            re.search(rf"(?<![A-Z0-9])S0*{season}[\s._-]*E0*{episode}(?![A-Z0-9])", title, re.IGNORECASE)
+            or re.search(rf"(?<![A-Z0-9]){season}\s*[xX]\s*0*{episode}(?![A-Z0-9])", title)
+            or (season == 1 and re.search(rf"第\s*0*{episode}\s*[集话話]", title))
         )
 
-    def __collect_tlist_entries(self, keyword):
+    def __collect_tlist_entries(self, keyword, target_season=None, target_episode=None):
         """
         getTList 不支持关键字搜索，只能把"电影"、"电视剧"两个分类的全部分页拉完，
         再本地按标题匹配关键字。站点虽然返回 total，但超过 total 仍可能有数据，
-        因此按页递增；找到当前剧集的 S01E01 后即可停止。
+        因此按页递增；找到目标剧集（缺失的最早一集）后即可停止，没有目标时翻完全部分页。
         """
         entries = []
         finished_categories = set()
@@ -285,7 +302,10 @@ class Btl(_IPluginModule):
                     page_signatures[category].add(signature)
                 entries.extend(page_list)
 
-                if any(self.__is_first_episode(entry, keyword) for entry in page_list):
+                if target_season and any(
+                    self.__is_target_episode(entry, keyword, target_season, target_episode)
+                    for entry in page_list
+                ):
                     return entries
 
             if len(finished_categories) == len(self._tlist_categories):

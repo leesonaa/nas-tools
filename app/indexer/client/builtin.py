@@ -203,7 +203,9 @@ class BuiltinIndexer(_IIndexClient):
                     mtype=match_media.type if match_media and match_media.tmdb_info else None)
             else:
                 if PluginsSpider().status(indexer=indexer):
-                    error_flag, result_array = PluginsSpider().search(keyword=search_word, indexer=indexer)
+                    error_flag, result_array = PluginsSpider().search(keyword=search_word,
+                                                                      indexer=indexer,
+                                                                      filter_args=_filter_args)
                 else:
                     error_flag, result_array = self.__spider_search(
                         spider=TorrentSpider(),
@@ -307,8 +309,8 @@ class BuiltinIndexer(_IIndexClient):
             # error_flag, result_array = spider.search()
         else:
             if PluginsSpider().status(indexer=indexer):
-                error_flag, result_array = PluginsSpider().search(keyword=keyword, 
-                                                                  indexer=indexer, 
+                error_flag, result_array = PluginsSpider().search(keyword=keyword,
+                                                                  indexer=indexer,
                                                                   page=page)
 
             else:

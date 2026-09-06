@@ -178,7 +178,7 @@ class Lou1(_IPluginModule):
         # 插件自己发的请求（搜索接口、详情页解析）统一走 nas-tools 全局代理设置
         return Config().get_proxies()
 
-    def search(self, indexer, keyword, page=0):
+    def search(self, indexer, keyword, page=0, filter_args=None):
         if not indexer or not keyword:
             return []
 

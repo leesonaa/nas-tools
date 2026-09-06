@@ -23,9 +23,9 @@ class PluginsSpider(object):
         except Exception as e:
             return False
 
-    def search(self, keyword, indexer, page=0):
+    def search(self, keyword, indexer, page=0, filter_args=None):
         try:
-            result_array = PluginManager().run_plugin_method(pid=indexer.parser, method='search', keyword=keyword, indexer=indexer, page=page)
+            result_array = PluginManager().run_plugin_method(pid=indexer.parser, method='search', keyword=keyword, indexer=indexer, page=page, filter_args=filter_args)
             if not result_array:
                 return False, []
             return True, result_array
