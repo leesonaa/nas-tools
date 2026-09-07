@@ -249,15 +249,12 @@ class Btl(_IPluginModule):
     def __get_target_episode(filter_args):
         """
         取订阅缺失的最早一集作为翻页停止目标：缺失从 E06 开始就只需翻到 E06，
-        不必像补全第一季那样一直翻到 E01；filter_args 缺失或为电影时不设目标。
+        不必像补全第一季那样一直翻到 E01；filter_args 未指定季/集时默认按 S01E01 找起，
+        找到该集（或覆盖该集的整季资源）即可停止翻页。
         """
-        if not filter_args:
-            return None, None
-        seasons = filter_args.get("season")
-        if not seasons:
-            return None, None
-        episodes = filter_args.get("episode")
-        target_season = min(s for s in seasons if s is not None)
+        seasons = filter_args.get("season") if filter_args else None
+        episodes = filter_args.get("episode") if filter_args else None
+        target_season = min((s for s in seasons if s is not None), default=1) if seasons else 1
         target_episode = min((e for e in episodes if e is not None), default=1) if episodes else 1
         return target_season, target_episode
 
@@ -280,11 +277,11 @@ class Btl(_IPluginModule):
                 return True
         return False
 
-    def __collect_tlist_entries(self, keyword, target_season=None, target_episode=None):
+    def __collect_tlist_entries(self, keyword, target_season, target_episode):
         """
-        getTList 不支持关键字搜索，只能把"电影"、"电视剧"两个分类的全部分页拉完，
-        再本地按标题匹配关键字。站点虽然返回 total，但超过 total 仍可能有数据，
-        因此按页递增；找到目标剧集（缺失的最早一集）后即可停止，没有目标时翻完全部分页。
+        getTList 不支持关键字搜索，只能把"电影"、"电视剧"两个分类逐页翻下去，
+        再本地按标题匹配关键字；只要匹配到目标集数（默认 S01E01，或覆盖它的整季资源），
+        立即停止翻页并返回，不必等翻完全部分页。
         """
         entries = []
         finished_categories = set()
@@ -310,7 +307,7 @@ class Btl(_IPluginModule):
                     page_signatures[category].add(signature)
                 entries.extend(page_list)
 
-                if target_season and any(
+                if any(
                     self.__is_target_episode(entry, keyword, target_season, target_episode)
                     for entry in page_list
                 ):

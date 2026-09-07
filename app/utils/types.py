@@ -202,4 +202,4 @@ MovieTypes = ['MOV', '电影', MediaType.MOVIE]
 TvTypes = ['TV', '电视剧', MediaType.TV]
 
 # 内置索引器文件md5值
-BuiltinIndexerFileMd5 = "e87e1a1579c9211af7f6a183e72486ed"
+BuiltinIndexerFileMd5 = "d8b9a4811eee253911a7a34b7cd62826"
