@@ -266,11 +266,19 @@ class Btl(_IPluginModule):
         if not Btl.__entry_matches_keyword(entry, keyword):
             return False
         title = " ".join(str(entry.get(field) or "") for field in ("title", "zname"))
-        return bool(
-            re.search(rf"(?<![A-Z0-9])S0*{season}[\s._-]*E0*{episode}(?![A-Z0-9])", title, re.IGNORECASE)
-            or re.search(rf"(?<![A-Z0-9]){season}\s*[xX]\s*0*{episode}(?![A-Z0-9])", title)
-            or (season == 1 and re.search(rf"第\s*0*{episode}\s*[集话話]", title))
-        )
+        if re.search(rf"(?<![A-Z0-9])S0*{season}[\s._-]*E0*{episode}(?![A-Z0-9])", title, re.IGNORECASE):
+            return True
+        if re.search(rf"(?<![A-Z0-9]){season}\s*[xX]\s*0*{episode}(?![A-Z0-9])", title):
+            return True
+        if season != 1:
+            return False
+        # 整季资源常按"第01-04集"这样的区间命名，而非单集，需判断目标集是否落在区间内
+        for match in re.finditer(r"第\s*0*(\d+)(?:\s*[-~]\s*0*(\d+))?\s*[集话話]", title):
+            start = int(match.group(1))
+            end = int(match.group(2)) if match.group(2) else start
+            if start <= episode <= end:
+                return True
+        return False
 
     def __collect_tlist_entries(self, keyword, target_season=None, target_episode=None):
         """
