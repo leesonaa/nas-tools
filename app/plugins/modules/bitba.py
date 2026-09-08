@@ -1,7 +1,8 @@
-import html
+import json
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from html import unescape
 
 import requests
 
@@ -205,14 +206,17 @@ class Bitba(_IPluginModule):
 
     def __search_dids(self, keyword):
         """
-        站内搜索建议接口，返回匹配的剧目 did 列表（不含具体资源/磁力信息）
+        站内搜索建议接口，返回匹配的剧目 did 列表（不含具体资源/磁力信息）。
+        该接口是模糊搜索（类似 Meilisearch 的容错匹配），关键字越短/越通用（尤其是英文）
+        越容易带出完全不相关的剧目（如搜 "A Bona Fide Killer" 会带出一堆《A计划》），
+        所以要多拉一些候选结果，再按标题/别名做本地过滤，只保留真正命中关键字的剧目。
         """
         try:
             resp = RequestUtils(
                 headers={"User-Agent": self._ua, "Content-Type": "application/json"},
                 proxies=self._proxies(),
                 timeout=10,
-            ).post_res(url=self._search_api, json={"q": keyword, "limit": self._max_dids})
+            ).post_res(url=self._search_api, json={"q": keyword, "limit": max(20, self._max_dids * 3)})
         except Exception as e:
             ExceptionUtils.exception_traceback(e)
             return []
@@ -224,7 +228,38 @@ class Bitba(_IPluginModule):
             ExceptionUtils.exception_traceback(e)
             return []
         hits = data.get("hits") or []
-        return [hit.get("did") for hit in hits if hit.get("did")][:self._max_dids]
+        dids = []
+        for hit in hits:
+            did = hit.get("did")
+            if not did or not self.__hit_matches_keyword(hit, keyword):
+                continue
+            dids.append(did)
+            if len(dids) >= self._max_dids:
+                break
+        return dids
+
+    @staticmethod
+    def __normalize_match_title(title):
+        title = unescape(str(title or "")).casefold()
+        return re.sub(r"[^\w\u4e00-\u9fff]+", "", title)
+
+    @classmethod
+    def __hit_matches_keyword(cls, hit, keyword):
+        keyword = cls.__normalize_match_title(keyword)
+        if not keyword:
+            return False
+        candidates = list(hit.get("title") or [])
+        try:
+            candidates.extend(json.loads(hit.get("othertitle") or "[]") or [])
+        except (TypeError, ValueError):
+            pass
+        for candidate in candidates:
+            candidate = cls.__normalize_match_title(candidate)
+            if not candidate:
+                continue
+            if candidate == keyword or keyword in candidate or candidate in keyword:
+                return True
+        return False
 
     def __parse_detail_page(self, did):
         """
@@ -254,7 +289,7 @@ class Bitba(_IPluginModule):
             torrents.append({
                 "did": item_did,
                 "hash": torrent_hash,
-                "title": html.unescape(title),
+                "title": unescape(title),
                 "size": StringUtils.num_filesize(size_text),
                 "heat": int(heat),
                 "page_url": page_url,
