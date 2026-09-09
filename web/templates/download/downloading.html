@@ -174,13 +174,14 @@
   function show_torrent_download_modal(type) {
     show_download_modal('', '', '', function(){
       let urls = $("#torrent_urls").val();
-      if ((!TorrentDropZone || !TorrentDropZone.files || !TorrentDropZone.files[0]) && !urls) {
+      const url_list = urls.split(/\r?\n/).map(url => url.trim()).filter(Boolean);
+      if ((!TorrentDropZone || !TorrentDropZone.files || !TorrentDropZone.files[0]) && !url_list.length) {
         return;
       }
       $("#search_download_btn").text("处理中...").attr("disabled", true);
       const params = {
         "files": TorrentDropZone.files,
-        "urls": urls.split("\n"),
+        "urls": url_list,
         "dl_dir": get_savepath("search_download_dir", "search_download_dir_manual"),
         "dl_setting": $("#search_download_setting").val()
       }

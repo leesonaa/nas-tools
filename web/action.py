@@ -660,8 +660,12 @@ class WebAction:
         dl_setting = data.get("dl_setting")
         files = data.get("files") or []
         urls = data.get("urls") or []
+        if not isinstance(urls, list):
+            urls = [urls]
+        urls = [url.strip() for url in urls if isinstance(url, str) and url.strip()]
         if not files and not urls:
             return {"code": -1, "msg": "没有种子文件或者种子链接"}
+        errors = []
         # 下载种子
         for file_item in files:
             if not file_item:
@@ -679,15 +683,25 @@ class WebAction:
                                   in_from=SearchType.WEB,
                                   user_name=current_user.username)
         # 下载链接
-        if urls and not isinstance(urls, list):
-            urls = [urls]
         for url in urls:
-            if not url:
+            if Torrent.is_magnet(url):
+                media_info = MetaInfo("磁力链接")
+                media_info.enclosure = url
+                _, ret, _, ret_msg = Downloader().download(
+                    media_info=media_info,
+                    download_dir=dl_dir,
+                    download_setting=dl_setting,
+                    in_from=SearchType.WEB,
+                    user_name=current_user.username
+                )
+                if not ret and ret_msg:
+                    errors.append(f"{url[:80]}：{ret_msg}")
                 continue
             # 查询站点
             site_info = Sites().get_sites(siteurl=url)
             if not site_info:
-                return {"code": -1, "msg": "根据链接地址未匹配到站点"}
+                errors.append(f"{url[:80]}：根据链接地址未匹配到站点")
+                continue
             # 下载种子文件，并读取信息
             file_path, _, _, _, retmsg = Torrent().get_torrent_info(
                 url=url,
@@ -696,18 +710,23 @@ class WebAction:
                 proxy=site_info.get("proxy")
             )
             if not file_path:
-                return {"code": -1, "msg": f"下载种子文件失败： {retmsg}"}
+                errors.append(f"{url[:80]}：下载种子文件失败： {retmsg}")
+                continue
             media_info = Media().get_media_info(title=os.path.basename(file_path))
             if media_info:
                 media_info.site = "WEB"
             # 添加下载
-            Downloader().download(media_info=media_info,
-                                  download_dir=dl_dir,
-                                  download_setting=dl_setting,
-                                  torrent_file=file_path,
-                                  in_from=SearchType.WEB,
-                                  user_name=current_user.username)
+            _, ret, _, ret_msg = Downloader().download(media_info=media_info,
+                                                        download_dir=dl_dir,
+                                                        download_setting=dl_setting,
+                                                        torrent_file=file_path,
+                                                        in_from=SearchType.WEB,
+                                                        user_name=current_user.username)
+            if not ret and ret_msg:
+                errors.append(f"{url[:80]}：{ret_msg}")
 
+        if errors:
+            return {"code": -1, "msg": "；".join(errors)}
         return {"code": 0, "msg": "添加下载完成！"}
 
     @staticmethod
@@ -1419,7 +1438,7 @@ class WebAction:
             return {"code": 0}
         elif flag == "locating":
             _sync.check_sync_paths(sid=sid, locating=1 if checked else 0)
-            return {"code": 0}        
+            return {"code": 0}
         else:
             return {"code": 1}
 
@@ -3836,7 +3855,7 @@ class WebAction:
         MediaHander = Media()
         DownloaderHandler = Downloader()
         torrents = DownloaderHandler.get_downloading_progress(downloader_id=dl_id, force_list=bool(force_list))
-        
+
         for torrent in torrents:
             # 先查询下载记录，没有再识别
             name = torrent.get("name")
@@ -3997,7 +4016,7 @@ class WebAction:
         }
 
     @staticmethod
-    def truncate_transfer_unknown(): 
+    def truncate_transfer_unknown():
         """
         清空媒体手动整理历史记录
         """
@@ -4189,8 +4208,8 @@ class WebAction:
                 if movie_path is not None: media_dirs.extend([path.rstrip('/') for path in movie_path])
                 if tv_path is not None: media_dirs.extend([path.rstrip('/') for path in tv_path])
                 if anime_path is not None: media_dirs.extend([path.rstrip('/') for path in anime_path])
-                if unknown_path is not None: media_dirs.extend([path.rstrip('/') for path in unknown_path])   
-                dirs = list(set(media_dirs))             
+                if unknown_path is not None: media_dirs.extend([path.rstrip('/') for path in unknown_path])
+                dirs = list(set(media_dirs))
             else:
                 d = os.path.normpath(unquote(d))
                 if not os.path.isdir(d):
@@ -4243,11 +4262,11 @@ class WebAction:
     def __get_filehardlinks(data):
         """
         获取文件硬链接
-        """            
+        """
         def parse_hardlinks(hardlinks):
             paths = []
             for link in hardlinks:
-                paths.append([SystemUtils.shorten_path(link["file"], 'left', 2), link["file"], link["filepath"]])      
+                paths.append([SystemUtils.shorten_path(link["file"], 'left', 2), link["file"], link["filepath"]])
             return paths
         r = {}
         try:
@@ -4255,7 +4274,7 @@ class WebAction:
             direction = ""
             hardlinks = []
             # 获取所有硬链接的同步目录设置
-            sync_dirs = Sync().get_filehardlinks_sync_dirs()  
+            sync_dirs = Sync().get_filehardlinks_sync_dirs()
             # 按设置遍历检查文件是否在同步目录内，只查找第一个匹配项，多余的忽略
             for dir in sync_dirs:
                 if dir[0] and file.startswith(f"{dir[0]}/"):
@@ -4265,7 +4284,7 @@ class WebAction:
                 elif dir[1] and file.startswith(f"{dir[1]}/"):
                     direction = '←'
                     hardlinks = parse_hardlinks(SystemUtils().find_hardlinks(file=file, fdir=dir[0]))
-                    break     
+                    break
             r={
                 "filepath": file,  # 文件路径
                 "direction": direction,  # 同步方向
@@ -4282,12 +4301,12 @@ class WebAction:
             "count": len(r),
             "data": r
         }
-        
+
     @staticmethod
     def __get_dirhardlink(data):
         """
         获取同步目录硬链接
-        """            
+        """
         r = {}
         try:
             path = data.get("dirpath")
@@ -4295,8 +4314,8 @@ class WebAction:
             hardlink = []
             locating = False
             # 获取所有硬链接的同步目录设置
-            sync_dirs = Sync().get_filehardlinks_sync_dirs()    
-            # 按设置遍历检查目录是否是同步目录或在同步目录内             
+            sync_dirs = Sync().get_filehardlinks_sync_dirs()
+            # 按设置遍历检查目录是否是同步目录或在同步目录内
             for dir in sync_dirs:
                 if dir[0] and (dir[0] == path or path.startswith(f"{dir[0]}/")):
                     direction = '→'
@@ -4325,7 +4344,7 @@ class WebAction:
             "count": len(r),
             "data": r
         }
-        
+
     @staticmethod
     def __rename_file(data):
         """
@@ -5149,7 +5168,7 @@ class WebAction:
         def add_is_default(dl_conf, defualt_id):
             dl_conf["is_default"] = str(dl_conf["id"]) == defualt_id
             return dl_conf
-        
+
         did = data.get("did")
         downloader = Downloader()
         resp = downloader.get_downloader_conf(did=did)
