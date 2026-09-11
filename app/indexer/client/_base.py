@@ -132,10 +132,12 @@ class _IIndexClient(metaclass=ABCMeta):
         match = True
         if meta_info.year:
             match = False
+            if str(meta_info.year) == str(media_info.year):
+                return True
             for season in media_info.tmdb_info.seasons:
                 if season.air_date:
                     year = season.air_date[0:4]
-                    if meta_info.year == year:
+                    if str(meta_info.year) == str(year):
                         return True
 
         return match
