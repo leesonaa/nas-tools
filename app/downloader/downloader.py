@@ -448,6 +448,8 @@ class Downloader:
                     title, download_dir, print_url))
             # 下载ID
             download_id = None
+            # qB 对已存在（含已完成）的种子会返回 409，被当作成功处理，此时不应再推送"开始下载"
+            already_completed = False
             downloader_type = downloader.get_type()
             if downloader_type == DownloaderType.TR:
                 ret = downloader.add_torrent(content,
@@ -485,6 +487,8 @@ class Downloader:
                                              stop_condition=stop_condition)
                 if ret:
                     download_id = downloader.get_torrent_id_by_tag(torrent_tag)
+                    if download_id and downloader.get_completed_torrents(ids=[download_id]):
+                        already_completed = True
                     http_sources = downloader_conf.get("config", {}).get("http_sources")
                     if download_id and http_sources:
                         http_sources = [source.strip() for source in str(http_sources).splitlines() if source.strip()]
@@ -535,13 +539,15 @@ class Downloader:
                             subtitle_dir
                         )
                     )
-                # 发送下载消息
-                if in_from and notify:
+                # 发送下载消息（已存在且已下载完成的种子不再误报"开始下载"）
+                if in_from and notify and not already_completed:
                     media_info.user_name = user_name
                     self.message.send_download_message(in_from=in_from,
                                                        can_item=media_info,
                                                        download_setting_name=download_setting_name,
                                                        downloader_name=downloader_name)
+                elif already_completed:
+                    log.info("【Downloader】%s 已存在且已下载完成，跳过\"开始下载\"推送" % title)
                 return downloader_id, download_id, container_path, ""
             else:
                 __download_fail("请检查下载任务是否已存在")

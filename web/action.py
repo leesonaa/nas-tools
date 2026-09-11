@@ -685,8 +685,12 @@ class WebAction:
         # 下载链接
         for url in urls:
             if Torrent.is_magnet(url):
-                media_info = MetaInfo("磁力链接")
+                media_info = MetaInfo(Torrent.get_magnet_title(url) or "磁力链接")
                 media_info.enclosure = url
+                media_info.site = "WEB"
+                magnet_size = Torrent.get_magnet_size(url)
+                if magnet_size:
+                    media_info.size = magnet_size
                 _, ret, _, ret_msg = Downloader().download(
                     media_info=media_info,
                     download_dir=dl_dir,

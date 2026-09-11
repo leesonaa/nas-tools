@@ -4,7 +4,7 @@ import time
 import re
 import tempfile
 import hashlib
-from urllib.parse import quote, unquote, urlencode, urlparse
+from urllib.parse import quote, unquote, urlencode, urlparse, parse_qs
 
 import libtorrent
 try:
@@ -379,19 +379,19 @@ class Torrent:
         """
         if torrent_dict is None:
             return None
-        
+
         magnet_info = {}
-        
+
         if 'info' in torrent_dict:
             info_hash = hashlib.sha1(bencode(torrent_dict['info'])).hexdigest()
             magnet_info['xt'] = 'urn:btih:' + info_hash
-        
+
         if 'name' in torrent_dict['info']:
             magnet_info['dn'] = torrent_dict['info']['name']
-        
+
         if 'announce' in torrent_dict:
             magnet_info['tr'] = torrent_dict['announce']
-        
+
         if 'announce-list' in torrent_dict:
             magnet_info['tr'] = [announce[0] for announce in torrent_dict['announce-list']]
 
@@ -408,7 +408,7 @@ class Torrent:
         temp_file_path = Torrent._write_binary_to_temp_file(binary_data)
         if not temp_file_path:
             return None
-        
+
         with open(temp_file_path, 'rb') as torrent_file:
             torrent_data = torrent_file.read()
             torrent_dict = Torrent._parse_torrent_dict(torrent_data)
@@ -442,7 +442,33 @@ class Torrent:
         """
         return link.lower().startswith("magnet:?xt=urn:btih:")
 
-    @staticmethod        
+    @staticmethod
+    def get_magnet_title(link):
+        """
+        从磁力链接的 dn 参数中取出种子原始名称，取不到时返回 None
+        """
+        if not Torrent.is_magnet(link):
+            return None
+        try:
+            dn = parse_qs(urlparse(link).query).get("dn")
+            return dn[0] if dn else None
+        except Exception as err:
+            return None
+
+    @staticmethod
+    def get_magnet_size(link):
+        """
+        从磁力链接的 xl 参数中取出种子大小（字节），取不到时返回 None
+        """
+        if not Torrent.is_magnet(link):
+            return None
+        try:
+            xl = parse_qs(urlparse(link).query).get("xl")
+            return int(xl[0]) if xl and str(xl[0]).isdigit() else None
+        except Exception as err:
+            return None
+
+    @staticmethod
     def maybe_torrent_url(link):
         """
         判断是否可能是种子url

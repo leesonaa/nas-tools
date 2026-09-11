@@ -253,7 +253,10 @@ class Message(object):
             msg_text = f"{msg_text}\n种子：{can_item.org_string}"
         if can_item.seeders:
             msg_text = f"{msg_text}\n做种数：{can_item.seeders}"
-        msg_text = f"{msg_text}\n促销：{can_item.get_volume_factor_string()}"
+        # 站点没有回传促销信息（如直接粘贴磁力链接）时，不显示这行，避免每条都是"未知"
+        volume_factor_string = can_item.get_volume_factor_string()
+        if volume_factor_string != "未知":
+            msg_text = f"{msg_text}\n促销：{volume_factor_string}"
         if can_item.hit_and_run:
             msg_text = f"{msg_text}\nHit&Run：是"
         if can_item.description:
