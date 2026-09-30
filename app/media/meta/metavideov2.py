@@ -556,6 +556,34 @@ class MetaVideoV2(MetaBase):
         title = title.replace("[", ".")
         title = title.replace("]", ".")
 
+        # 替换"全X季"/"全X集"这类总季/总集标记为等价的季/集范围标记（如.S1-SX./.E1-EX.），
+        # 既避免"全"残留污染标题，又保留季/集边界，防止guessit把后面的字幕说明当成标题的一部分
+        season_all_pattern = f"({self._season_all_re}|{self._season_all_re_2})"
+        season_all_match = re.search(r'%s' % season_all_pattern, title, flags=re.IGNORECASE)
+        if season_all_match:
+            season_all_number_match = re.search(r'%s' % self._numbers_re, season_all_match.group(1))
+            fix_season_all = None
+            if season_all_number_match:
+                try:
+                    fix_season_all = int(cn2an.cn2an(re.sub(r'^0+', '', season_all_number_match.group(0)), "smart"))
+                except Exception as e:
+                    fix_season_all = None
+            replacement = f".S1-S{fix_season_all}." if fix_season_all and fix_season_all != 1 else ".S1."
+            title = re.sub(r'%s' % season_all_pattern, replacement, title, flags=re.IGNORECASE)
+
+        episode_all_pattern = f"({self._episode_all_re}|{self._episode_all_re_2})"
+        episode_all_match = re.search(r'%s' % episode_all_pattern, title, flags=re.IGNORECASE)
+        if episode_all_match:
+            episode_all_number_match = re.search(r'%s' % self._numbers_re, episode_all_match.group(1))
+            fix_episode_all = None
+            if episode_all_number_match:
+                try:
+                    fix_episode_all = int(cn2an.cn2an(re.sub(r'^0+', '', episode_all_number_match.group(0)), "smart"))
+                except Exception as e:
+                    fix_episode_all = None
+            replacement = f".E1-E{fix_episode_all}." if fix_episode_all and fix_episode_all != 1 else ".E1."
+            title = re.sub(r'%s' % episode_all_pattern, replacement, title, flags=re.IGNORECASE)
+
         # 匹配出季组
         seasons_pattern = f"({self._seasons_re}|{self._seasons_re_2})"
         seasons_match = re.search(r'%s' % seasons_pattern, title, flags=re.IGNORECASE)
