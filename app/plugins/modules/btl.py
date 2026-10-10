@@ -35,7 +35,9 @@ class Btl(_IPluginModule):
     _tlist_categories = (1, 2)
     # 站点固定每页返回 20 条，total 固定 400，即每个分类最多 20 页
     _tlist_page_size = 20
-    # 连接池大小，翻页请求按顺序执行以便在找到首集后及时停止
+    # 命中目标集后额外翻页，避免同剧资源分散在相邻分页而漏搜
+    _tlist_pages_after_match = 5
+    # 连接池大小，翻页请求按顺序执行以便命中后完成有限页数的补充检索
     _tlist_concurrency = 5
     # 接口允许超出 total 继续翻页，设置上限避免站点异常时无限请求
     _tlist_max_pages = 500
@@ -280,12 +282,13 @@ class Btl(_IPluginModule):
     def __collect_tlist_entries(self, keyword, target_season, target_episode):
         """
         getTList 不支持关键字搜索，只能把"电影"、"电视剧"两个分类逐页翻下去，
-        再本地按标题匹配关键字；只要匹配到目标集数（默认 S01E01，或覆盖它的整季资源），
-        立即停止翻页并返回，不必等翻完全部分页。
+        再本地按标题匹配关键字；匹配到目标集数（默认 S01E01，或覆盖它的整季资源）后，
+        再额外翻若干页，减少同剧资源分散在相邻分页时的漏搜。
         """
         entries = []
         finished_categories = set()
         page_signatures = {category: set() for category in self._tlist_categories}
+        stop_after_page = None
 
         for page in range(1, self._tlist_max_pages + 1):
             for category in self._tlist_categories:
@@ -307,13 +310,15 @@ class Btl(_IPluginModule):
                     page_signatures[category].add(signature)
                 entries.extend(page_list)
 
-                if any(
+                if stop_after_page is None and any(
                     self.__is_target_episode(entry, keyword, target_season, target_episode)
                     for entry in page_list
                 ):
-                    return entries
+                    stop_after_page = page + self._tlist_pages_after_match
 
             if len(finished_categories) == len(self._tlist_categories):
+                break
+            if stop_after_page is not None and page >= stop_after_page:
                 break
 
         return entries
