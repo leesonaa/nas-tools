@@ -1,6 +1,8 @@
 import json
 import re
 from html import unescape
+from html.parser import HTMLParser
+from threading import Lock
 from urllib.parse import urlparse
 
 import requests
@@ -10,6 +12,26 @@ from app.plugins.modules._base import _IPluginModule
 from app.sites import Sites
 from app.utils import RequestUtils, ExceptionUtils, StringUtils
 from config import Config
+
+
+class _WafChallengeParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_form = False
+        self.form_valid = False
+        self.captcha_id = None
+
+    def handle_starttag(self, tag, attrs):
+        attrs = dict(attrs)
+        if tag == "form" and attrs.get("id") == "ui-form":
+            self.in_form = True
+            self.form_valid = attrs.get("method", "").lower() == "post" and not attrs.get("action")
+        elif tag == "input" and self.in_form and attrs.get("name") == "GOEDGE_WAF_CAPTCHA_ID":
+            self.captcha_id = attrs.get("value")
+
+    def handle_endtag(self, tag):
+        if tag == "form":
+            self.in_form = False
 
 
 class Btl(_IPluginModule):
@@ -42,6 +64,9 @@ class Btl(_IPluginModule):
     # 接口允许超出 total 继续翻页，设置上限避免站点异常时无限请求
     _tlist_max_pages = 500
     _ua = None
+    _cookie = ""
+    _custom_ua = ""
+    _auto_waf = True
     # 复用同一个连接池（keep-alive），省掉重复握手开销
     _session = None
 
@@ -69,6 +94,39 @@ class Btl(_IPluginModule):
                             "type": "text",
                             "content": [
                                 {"id": "tlist_url", "placeholder": "https://web5.mukaku.com/prod/api/v1/getTList"}
+                            ],
+                        }
+                    ],
+                    [
+                        {
+                            "title": "Cookie",
+                            "required": "",
+                            "tooltip": "可选；自动验证成功后会更新会话 Cookie",
+                            "type": "text",
+                            "content": [
+                                {"id": "cookie", "placeholder": "通过滑块验证后的 Cookie"}
+                            ],
+                        }
+                    ],
+                    [
+                        {
+                            "title": "自动处理站点验证",
+                            "required": "",
+                            "tooltip": "遇到支持的 WAF 滑块验证时，自动提交验证并重试请求",
+                            "type": "select",
+                            "content": [
+                                {"id": "auto_waf", "default": "1", "options": {"1": "开启", "0": "关闭"}}
+                            ],
+                        }
+                    ],
+                    [
+                        {
+                            "title": "User-Agent",
+                            "required": "",
+                            "tooltip": "需与获取 Cookie 的浏览器 UA 一致，留空使用系统默认",
+                            "type": "text",
+                            "content": [
+                                {"id": "custom_ua", "placeholder": "获取 Cookie 的浏览器 UA"}
                             ],
                         }
                     ],
@@ -104,8 +162,23 @@ class Btl(_IPluginModule):
             except (TypeError, ValueError):
                 pass
             self._enable = config.get("enable")
-        self._ua = Config().get_ua()
+            self._cookie = (config.get("cookie") or "").strip()
+            self._custom_ua = (config.get("custom_ua") or "").strip()
+            self._auto_waf = str(config.get("auto_waf", "1")) == "1"
+        self._ua = self._custom_ua or Config().get_ua()
         self._session = requests.Session()
+        self._request_lock = Lock()
+        if self._cookie:
+            host = urlparse(self._tlist_url).hostname
+            if not host:
+                self.error(f"【{self.module_name}】列表接口地址无效，无法设置 Cookie")
+            else:
+                for part in self._cookie.split(";"):
+                    name, sep, value = part.strip().partition("=")
+                    if not sep or not name:
+                        self.warn(f"【{self.module_name}】Cookie 格式无效，请使用名称=值的格式")
+                        continue
+                    self._session.cookies.set(name.strip(), value.strip(), domain=host, path="/")
         adapter = requests.adapters.HTTPAdapter(
             pool_connections=self._tlist_concurrency, pool_maxsize=self._tlist_concurrency
         )
@@ -323,6 +396,36 @@ class Btl(_IPluginModule):
 
         return entries
 
+    def __verify_waf(self, client, response):
+        original = urlparse(self._tlist_url)
+        challenge = urlparse(response.url)
+        if (challenge.scheme, challenge.hostname, challenge.port) != (
+            original.scheme, original.hostname, original.port
+        ) or challenge.path != "/WAF/VERIFY/CAPTCHA":
+            self.error(f"【{self.module_name}】WAF 验证地址不匹配，已停止验证")
+            return False
+
+        parser = _WafChallengeParser()
+        parser.feed(response.text)
+        nonce = re.search(
+            r'setAttribute\(\s*["\']name["\']\s*,\s*["\']nonce["\']\s*\)'
+            r'.*?setAttribute\(\s*["\']value["\']\s*,\s*["\'](\d+)["\']\s*\)',
+            response.text, re.DOTALL
+        )
+        if not parser.form_valid or not parser.captcha_id or not nonce:
+            self.error(f"【{self.module_name}】不支持当前 WAF 验证页面，无法自动验证")
+            return False
+
+        result = client.post_res(
+            response.url,
+            data={"GOEDGE_WAF_CAPTCHA_ID": parser.captcha_id, "nonce": nonce.group(1)},
+            allow_redirects=False,
+        )
+        if result is None or result.status_code not in (302, 303):
+            self.error(f"【{self.module_name}】WAF 自动验证失败，请检查站点验证方式")
+            return False
+        return True
+
     def __get_tlist_page(self, category, page):
         params = {
             "app_id": self._app_id,
@@ -331,19 +434,31 @@ class Btl(_IPluginModule):
             "page": page,
             "limit": self._tlist_page_size,
         }
-        try:
-            resp = RequestUtils(
-                headers=self._headers(), proxies=self._proxies(), session=self._session, timeout=15
-            ).get_res(url=self._tlist_url, params=params)
-        except Exception as e:
-            ExceptionUtils.exception_traceback(e)
-            return [], 0
-        if not resp or resp.status_code != 200:
+        client = RequestUtils(
+            headers=self._headers(), proxies=self._proxies(), session=self._session, timeout=15
+        )
+        with self._request_lock:
+            resp = client.get_res(url=self._tlist_url, params=params)
+            if resp is None:
+                self.error(f"【{self.module_name}】列表接口请求失败")
+                return [], 0
+            if "/WAF/VERIFY" in urlparse(resp.url).path:
+                if not self._auto_waf:
+                    self.warn(f"【{self.module_name}】站点要求 WAF 验证，自动验证已关闭")
+                    return [], 0
+                if not self.__verify_waf(client, resp):
+                    return [], 0
+                resp = client.get_res(url=self._tlist_url, params=params)
+                if resp is None or "/WAF/VERIFY" in urlparse(resp.url).path:
+                    self.error(f"【{self.module_name}】WAF 验证后重试失败")
+                    return [], 0
+        if resp.status_code != 200:
+            self.error(f"【{self.module_name}】列表接口返回 HTTP {resp.status_code}")
             return [], 0
         try:
             data = resp.json()
-        except Exception as e:
-            ExceptionUtils.exception_traceback(e)
+        except requests.exceptions.JSONDecodeError:
+            self.error(f"【{self.module_name}】列表接口返回的不是有效 JSON")
             return [], 0
         if not data.get("success"):
             return [], 0
