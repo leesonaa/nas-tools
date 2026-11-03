@@ -1,7 +1,9 @@
 import json
 import re
+import time
 from html import unescape
 from html.parser import HTMLParser
+from http.cookies import CookieError, SimpleCookie
 from threading import Lock
 from urllib.parse import urlparse
 
@@ -112,7 +114,7 @@ class Btl(_IPluginModule):
                         {
                             "title": "自动处理站点验证",
                             "required": "",
-                            "tooltip": "遇到支持的 WAF 滑块验证时，自动提交验证并重试请求",
+                            "tooltip": "遇到支持的 WAF 滑块或 JavaScript 验证时，自动处理并重试请求",
                             "type": "select",
                             "content": [
                                 {"id": "auto_waf", "default": "1", "options": {"1": "开启", "0": "关闭"}}
@@ -426,6 +428,46 @@ class Btl(_IPluginModule):
             return False
         return True
 
+    def __verify_js_waf(self, response):
+        original = urlparse(self._tlist_url)
+        challenge = urlparse(response.url)
+        if (challenge.scheme, challenge.hostname, challenge.port) != (
+            original.scheme, original.hostname, original.port
+        ):
+            self.error(f"【{self.module_name}】WAF 验证地址不匹配，已停止验证")
+            return False
+
+        match = re.search(
+            r'document\.cookie\s*=\s*(["\'])(ge_js_validator_\d+=[^"\']*)\1',
+            response.text,
+        )
+        if not match or not re.search(r'window\.location\.reload\s*\(\s*\)', response.text):
+            self.error(f"【{self.module_name}】不支持当前 WAF JavaScript 验证页面")
+            return False
+        cookies = SimpleCookie()
+        try:
+            cookies.load(match.group(2))
+        except CookieError:
+            self.error(f"【{self.module_name}】WAF JavaScript 验证 Cookie 格式无效")
+            return False
+        if len(cookies) != 1:
+            self.error(f"【{self.module_name}】WAF JavaScript 验证 Cookie 格式无效")
+            return False
+        name, cookie = next(iter(cookies.items()))
+        if (not re.fullmatch(r"ge_js_validator_\d+", name) or not cookie.value
+                or cookie["domain"] or cookie["httponly"] or cookie["path"] not in ("", "/")):
+            self.error(f"【{self.module_name}】WAF JavaScript 验证 Cookie 属性不受支持")
+            return False
+        max_age = cookie["max-age"]
+        if max_age and (not max_age.isdigit() or int(max_age) <= 0):
+            self.error(f"【{self.module_name}】WAF JavaScript 验证 Cookie 有效期无效")
+            return False
+        self._session.cookies.set(
+            name, cookie.value, domain=challenge.hostname, path="/",
+            secure=bool(cookie["secure"]), expires=int(time.time()) + int(max_age) if max_age else None,
+        )
+        return True
+
     def __get_tlist_page(self, category, page):
         params = {
             "app_id": self._app_id,
@@ -438,27 +480,43 @@ class Btl(_IPluginModule):
             headers=self._headers(), proxies=self._proxies(), session=self._session, timeout=15
         )
         with self._request_lock:
-            resp = client.get_res(url=self._tlist_url, params=params)
-            if resp is None:
-                self.error(f"【{self.module_name}】列表接口请求失败")
-                return [], 0
-            if "/WAF/VERIFY" in urlparse(resp.url).path:
+            handled = set()
+            for _ in range(3):
+                resp = client.get_res(url=self._tlist_url, params=params)
+                if resp is None:
+                    self.error(f"【{self.module_name}】列表接口请求失败")
+                    return [], 0
+                if "/WAF/VERIFY" in urlparse(resp.url).path:
+                    challenge = "captcha"
+                elif (resp.status_code == 200 and "text/html" in resp.headers.get("Content-Type", "").lower()
+                      and "ge_js_validator_" in resp.text):
+                    challenge = "javascript"
+                else:
+                    break
                 if not self._auto_waf:
                     self.warn(f"【{self.module_name}】站点要求 WAF 验证，自动验证已关闭")
                     return [], 0
-                if not self.__verify_waf(client, resp):
-                    return [], 0
-                resp = client.get_res(url=self._tlist_url, params=params)
-                if resp is None or "/WAF/VERIFY" in urlparse(resp.url).path:
+                if challenge in handled:
                     self.error(f"【{self.module_name}】WAF 验证后重试失败")
                     return [], 0
+                handled.add(challenge)
+                if challenge == "captcha":
+                    verified = self.__verify_waf(client, resp)
+                else:
+                    verified = self.__verify_js_waf(resp)
+                if not verified:
+                    return [], 0
+            else:
+                self.error(f"【{self.module_name}】WAF 验证后重试失败")
+                return [], 0
         if resp.status_code != 200:
             self.error(f"【{self.module_name}】列表接口返回 HTTP {resp.status_code}")
             return [], 0
         try:
             data = resp.json()
         except requests.exceptions.JSONDecodeError:
-            self.error(f"【{self.module_name}】列表接口返回的不是有效 JSON")
+            content_type = resp.headers.get("Content-Type", "未知")
+            self.error(f"【{self.module_name}】列表接口返回的不是有效 JSON（内容类型：{content_type}）")
             return [], 0
         if not data.get("success"):
             return [], 0
