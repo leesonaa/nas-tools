@@ -1,13 +1,16 @@
+import hashlib
 import json
 import re
-import time
 from html import unescape
-from html.parser import HTMLParser
-from http.cookies import CookieError, SimpleCookie
 from threading import Lock
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 import requests
+from bencode import BencodeDecodeError
+try:
+    from bencode import bencode, bdecode
+except ImportError:
+    from bencode import encode as bencode, decode as bdecode
 
 from app.indexer.indexerConf import IndexerConf
 from app.plugins.modules._base import _IPluginModule
@@ -16,32 +19,12 @@ from app.utils import RequestUtils, ExceptionUtils, StringUtils
 from config import Config
 
 
-class _WafChallengeParser(HTMLParser):
-    def __init__(self):
-        super().__init__()
-        self.in_form = False
-        self.form_valid = False
-        self.captcha_id = None
-
-    def handle_starttag(self, tag, attrs):
-        attrs = dict(attrs)
-        if tag == "form" and attrs.get("id") == "ui-form":
-            self.in_form = True
-            self.form_valid = attrs.get("method", "").lower() == "post" and not attrs.get("action")
-        elif tag == "input" and self.in_form and attrs.get("name") == "GOEDGE_WAF_CAPTCHA_ID":
-            self.captcha_id = attrs.get("value")
-
-    def handle_endtag(self, tag):
-        if tag == "form":
-            self.in_form = False
-
-
 class Btl(_IPluginModule):
     module_name = "不太灵影视"
     module_desc = "让内建索引器支持检索不太灵影视资源（支持全分页磁力链接）"
     module_icon = "btl.png"
     module_color = "#0EA5E9"
-    module_version = "0.2"
+    module_version = "0.3"
     module_author = "leeson"
     author_url = ""
     module_config_prefix = "btl_"
@@ -50,8 +33,7 @@ class Btl(_IPluginModule):
 
     _enable = False
     _domain = "https://web5.mukaku.com"
-    # getVideoDetail 已被站点加了 VIP 限制（need_vip），拿不到磁力；
-    # getTList（首页"最新资源列表"接口）不受此限制，且列表数据里直接带 zlink，改用这个
+    # 列表可能不再直接提供 zlink，优先使用磁力按钮接口，失败时尝试通过种子生成。
     _tlist_url = "https://web5.mukaku.com/prod/api/v1/getTList"
     _app_id = "83768d9ad4"
     _identity = "23734adac0301bccdcb107c4aa21f96c"
@@ -68,7 +50,6 @@ class Btl(_IPluginModule):
     _ua = None
     _cookie = ""
     _custom_ua = ""
-    _auto_waf = True
     # 复用同一个连接池（keep-alive），省掉重复握手开销
     _session = None
 
@@ -103,21 +84,10 @@ class Btl(_IPluginModule):
                         {
                             "title": "Cookie",
                             "required": "",
-                            "tooltip": "可选；自动验证成功后会更新会话 Cookie",
+                            "tooltip": "可选，站点请求使用的 Cookie",
                             "type": "text",
                             "content": [
-                                {"id": "cookie", "placeholder": "通过滑块验证后的 Cookie"}
-                            ],
-                        }
-                    ],
-                    [
-                        {
-                            "title": "自动处理站点验证",
-                            "required": "",
-                            "tooltip": "遇到支持的 WAF 滑块或 JavaScript 验证时，自动处理并重试请求",
-                            "type": "select",
-                            "content": [
-                                {"id": "auto_waf", "default": "1", "options": {"1": "开启", "0": "关闭"}}
+                                {"id": "cookie", "placeholder": "站点 Cookie"}
                             ],
                         }
                     ],
@@ -166,7 +136,6 @@ class Btl(_IPluginModule):
             self._enable = config.get("enable")
             self._cookie = (config.get("cookie") or "").strip()
             self._custom_ua = (config.get("custom_ua") or "").strip()
-            self._auto_waf = str(config.get("auto_waf", "1")) == "1"
         self._ua = self._custom_ua or Config().get_ua()
         self._session = requests.Session()
         self._request_lock = Lock()
@@ -383,6 +352,11 @@ class Btl(_IPluginModule):
                     continue
                 if signature:
                     page_signatures[category].add(signature)
+                for entry in page_list:
+                    link = entry.get("zlink") or ""
+                    if (self.__entry_matches_keyword(entry, keyword)
+                            and (not isinstance(link, str) or not link.lower().startswith("magnet:"))):
+                        entry["zlink"] = self.__get_magnet(entry)
                 entries.extend(page_list)
 
                 if stop_after_page is None and any(
@@ -398,75 +372,78 @@ class Btl(_IPluginModule):
 
         return entries
 
-    def __verify_waf(self, client, response):
-        original = urlparse(self._tlist_url)
-        challenge = urlparse(response.url)
-        if (challenge.scheme, challenge.hostname, challenge.port) != (
-            original.scheme, original.hostname, original.port
-        ) or challenge.path != "/WAF/VERIFY/CAPTCHA":
-            self.error(f"【{self.module_name}】WAF 验证地址不匹配，已停止验证")
-            return False
-
-        parser = _WafChallengeParser()
-        parser.feed(response.text)
-        nonce = re.search(
-            r'setAttribute\(\s*["\']name["\']\s*,\s*["\']nonce["\']\s*\)'
-            r'.*?setAttribute\(\s*["\']value["\']\s*,\s*["\'](\d+)["\']\s*\)',
-            response.text, re.DOTALL
+    def __get_response(self, url, params=None):
+        client = RequestUtils(
+            headers=self._headers(), proxies=self._proxies(), session=self._session, timeout=15
         )
-        if not parser.form_valid or not parser.captcha_id or not nonce:
-            self.error(f"【{self.module_name}】不支持当前 WAF 验证页面，无法自动验证")
-            return False
+        with self._request_lock:
+            resp = client.get_res(url=url, params=params, allow_redirects=False)
+        if resp is None:
+            self.error(f"【{self.module_name}】站点请求失败")
+            return None
+        if resp.status_code != 200:
+            self.error(f"【{self.module_name}】站点返回 HTTP {resp.status_code}")
+            return None
+        return resp
 
-        result = client.post_res(
-            response.url,
-            data={"GOEDGE_WAF_CAPTCHA_ID": parser.captcha_id, "nonce": nonce.group(1)},
-            allow_redirects=False,
-        )
-        if result is None or result.status_code not in (302, 303):
-            self.error(f"【{self.module_name}】WAF 自动验证失败，请检查站点验证方式")
-            return False
-        return True
+    def __get_magnet(self, entry):
+        resource_id = entry.get("id")
+        if resource_id:
+            url = urljoin(self._tlist_url, "recordMagnetView")
+            params = {"id": resource_id, "app_id": self._app_id, "identity": self._identity}
+            resp = self.__get_response(url, params=params)
+            if resp is not None:
+                try:
+                    data = resp.json()
+                except requests.exceptions.JSONDecodeError:
+                    self.error(f"【{self.module_name}】磁力接口返回的不是有效 JSON")
+                else:
+                    result = data.get("data") if isinstance(data, dict) and data.get("success") else None
+                    magnet = result.get("zlink") if isinstance(result, dict) else None
+                    if isinstance(magnet, str) and magnet.lower().startswith("magnet:"):
+                        return magnet
+                    message = data.get("message") if isinstance(data, dict) else None
+                    self.error(f"【{self.module_name}】磁力接口未返回有效链接：{message or '未知错误'}")
+        else:
+            self.warn(f"【{self.module_name}】匹配的资源缺少 ID，尝试下载种子")
+        return self.__download_magnet(entry)
 
-    def __verify_js_waf(self, response):
-        original = urlparse(self._tlist_url)
-        challenge = urlparse(response.url)
-        if (challenge.scheme, challenge.hostname, challenge.port) != (
-            original.scheme, original.hostname, original.port
-        ):
-            self.error(f"【{self.module_name}】WAF 验证地址不匹配，已停止验证")
-            return False
-
-        match = re.search(
-            r'document\.cookie\s*=\s*(["\'])(ge_js_validator_\d+=[^"\']*)\1',
-            response.text,
-        )
-        if not match or not re.search(r'window\.location\.reload\s*\(\s*\)', response.text):
-            self.error(f"【{self.module_name}】不支持当前 WAF JavaScript 验证页面")
-            return False
-        cookies = SimpleCookie()
+    def __download_magnet(self, entry):
+        down = entry.get("down")
+        if not isinstance(down, str) or not down:
+            self.warn(f"【{self.module_name}】匹配的资源缺少下载地址")
+            return ""
+        url = urljoin(self._tlist_url, down)
+        original, target = urlparse(self._tlist_url), urlparse(url)
+        if ((target.scheme, target.hostname, target.port) !=
+                (original.scheme, original.hostname, original.port)
+                or target.path != "/prod/api/v1/down"):
+            self.error(f"【{self.module_name}】资源下载地址不受支持")
+            return ""
+        resp = self.__get_response(url)
+        if resp is None:
+            return ""
         try:
-            cookies.load(match.group(2))
-        except CookieError:
-            self.error(f"【{self.module_name}】WAF JavaScript 验证 Cookie 格式无效")
-            return False
-        if len(cookies) != 1:
-            self.error(f"【{self.module_name}】WAF JavaScript 验证 Cookie 格式无效")
-            return False
-        name, cookie = next(iter(cookies.items()))
-        if (not re.fullmatch(r"ge_js_validator_\d+", name) or not cookie.value
-                or cookie["domain"] or cookie["httponly"] or cookie["path"] not in ("", "/")):
-            self.error(f"【{self.module_name}】WAF JavaScript 验证 Cookie 属性不受支持")
-            return False
-        max_age = cookie["max-age"]
-        if max_age and (not max_age.isdigit() or int(max_age) <= 0):
-            self.error(f"【{self.module_name}】WAF JavaScript 验证 Cookie 有效期无效")
-            return False
-        self._session.cookies.set(
-            name, cookie.value, domain=challenge.hostname, path="/",
-            secure=bool(cookie["secure"]), expires=int(time.time()) + int(max_age) if max_age else None,
-        )
-        return True
+            torrent = bdecode(resp.content.rstrip(b"\r\n"))
+            info = torrent["info"]
+            if not isinstance(info, dict) or not info.get("pieces"):
+                raise ValueError("缺少有效的 v1 种子信息")
+            digest = hashlib.sha1(bencode(info)).hexdigest()
+            trackers = []
+            if torrent.get("announce"):
+                trackers.append(torrent["announce"])
+            for tier in torrent.get("announce-list", []):
+                if isinstance(tier, list):
+                    trackers.extend(tracker for tracker in tier if tracker not in trackers)
+            params = []
+            if info.get("name"):
+                params.append(("dn", info["name"]))
+            params.extend(("tr", tracker) for tracker in trackers)
+            magnet = "magnet:?xt=urn:btih:" + digest
+            return magnet + ("&" + urlencode(params) if params else "")
+        except (BencodeDecodeError, ValueError, TypeError, KeyError, IndexError, UnicodeError) as err:
+            self.error(f"【{self.module_name}】无法解析资源种子：{err}")
+            return ""
 
     def __get_tlist_page(self, category, page):
         params = {
@@ -476,41 +453,8 @@ class Btl(_IPluginModule):
             "page": page,
             "limit": self._tlist_page_size,
         }
-        client = RequestUtils(
-            headers=self._headers(), proxies=self._proxies(), session=self._session, timeout=15
-        )
-        with self._request_lock:
-            handled = set()
-            for _ in range(3):
-                resp = client.get_res(url=self._tlist_url, params=params)
-                if resp is None:
-                    self.error(f"【{self.module_name}】列表接口请求失败")
-                    return [], 0
-                if "/WAF/VERIFY" in urlparse(resp.url).path:
-                    challenge = "captcha"
-                elif (resp.status_code == 200 and "text/html" in resp.headers.get("Content-Type", "").lower()
-                      and "ge_js_validator_" in resp.text):
-                    challenge = "javascript"
-                else:
-                    break
-                if not self._auto_waf:
-                    self.warn(f"【{self.module_name}】站点要求 WAF 验证，自动验证已关闭")
-                    return [], 0
-                if challenge in handled:
-                    self.error(f"【{self.module_name}】WAF 验证后重试失败")
-                    return [], 0
-                handled.add(challenge)
-                if challenge == "captcha":
-                    verified = self.__verify_waf(client, resp)
-                else:
-                    verified = self.__verify_js_waf(resp)
-                if not verified:
-                    return [], 0
-            else:
-                self.error(f"【{self.module_name}】WAF 验证后重试失败")
-                return [], 0
-        if resp.status_code != 200:
-            self.error(f"【{self.module_name}】列表接口返回 HTTP {resp.status_code}")
+        resp = self.__get_response(self._tlist_url, params=params)
+        if resp is None:
             return [], 0
         try:
             data = resp.json()
@@ -519,6 +463,7 @@ class Btl(_IPluginModule):
             self.error(f"【{self.module_name}】列表接口返回的不是有效 JSON（内容类型：{content_type}）")
             return [], 0
         if not data.get("success"):
+            self.error(f"【{self.module_name}】列表接口返回失败：{data.get('message') or '未知错误'}")
             return [], 0
         result_data = data.get("data") or {}
         return result_data.get("list") or [], result_data.get("total") or 0
