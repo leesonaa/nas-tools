@@ -1,7 +1,9 @@
 import hashlib
 import json
 import re
+import time
 from html import unescape
+from http.cookies import CookieError, SimpleCookie
 from threading import Lock
 from urllib.parse import urlencode, urljoin, urlparse
 
@@ -24,7 +26,7 @@ class Btl(_IPluginModule):
     module_desc = "让内建索引器支持检索不太灵影视资源（支持全分页磁力链接）"
     module_icon = "btl.png"
     module_color = "#0EA5E9"
-    module_version = "0.3"
+    module_version = "0.4"
     module_author = "leeson"
     author_url = ""
     module_config_prefix = "btl_"
@@ -372,12 +374,62 @@ class Btl(_IPluginModule):
 
         return entries
 
+    def __verify_javascript(self, response):
+        original = urlparse(self._tlist_url)
+        challenge = urlparse(response.url)
+        if (challenge.scheme, challenge.hostname, challenge.port) != (
+            original.scheme, original.hostname, original.port
+        ):
+            self.error(f"【{self.module_name}】站点验证地址不匹配")
+            return False
+        match = re.search(
+            r'document\.cookie\s*=\s*(["\'])(ge_js_validator_\d+=[^"\']*)\1',
+            response.text,
+        )
+        if not match or not re.search(r'window\.location\.reload\s*\(\s*\)', response.text):
+            self.error(f"【{self.module_name}】不支持当前站点 JavaScript 验证页面")
+            return False
+        cookies = SimpleCookie()
+        try:
+            cookies.load(match.group(2))
+        except CookieError:
+            self.error(f"【{self.module_name}】站点验证 Cookie 格式无效")
+            return False
+        if len(cookies) != 1:
+            self.error(f"【{self.module_name}】站点验证 Cookie 格式无效")
+            return False
+        name, cookie = next(iter(cookies.items()))
+        if (not re.fullmatch(r"ge_js_validator_\d+", name) or not cookie.value
+                or cookie["domain"] or cookie["httponly"] or cookie["path"] not in ("", "/")):
+            self.error(f"【{self.module_name}】站点验证 Cookie 属性不受支持")
+            return False
+        max_age = cookie["max-age"]
+        if max_age and (not max_age.isdigit() or int(max_age) <= 0):
+            self.error(f"【{self.module_name}】站点验证 Cookie 有效期无效")
+            return False
+        self._session.cookies.set(
+            name, cookie.value, domain=challenge.hostname, path="/",
+            secure=bool(cookie["secure"]), expires=int(time.time()) + int(max_age) if max_age else None,
+        )
+        return True
+
     def __get_response(self, url, params=None):
         client = RequestUtils(
             headers=self._headers(), proxies=self._proxies(), session=self._session, timeout=15
         )
         with self._request_lock:
             resp = client.get_res(url=url, params=params, allow_redirects=False)
+            if (resp is not None and resp.status_code == 200
+                    and "text/html" in resp.headers.get("Content-Type", "").lower()
+                    and "ge_js_validator_" in resp.text):
+                if not self.__verify_javascript(resp):
+                    return None
+                resp = client.get_res(url=url, params=params, allow_redirects=False)
+                if (resp is not None and resp.status_code == 200
+                        and "text/html" in resp.headers.get("Content-Type", "").lower()
+                        and "ge_js_validator_" in resp.text):
+                    self.error(f"【{self.module_name}】站点 JavaScript 验证后重试失败")
+                    return None
         if resp is None:
             self.error(f"【{self.module_name}】站点请求失败")
             return None
