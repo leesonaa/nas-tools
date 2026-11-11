@@ -1,5 +1,6 @@
-FROM python:3.10.11-alpine
-RUN apk add --no-cache --virtual .build-deps \
+FROM python:3.10.11-slim
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
         libffi-dev \
         gcc \
         musl-dev \
