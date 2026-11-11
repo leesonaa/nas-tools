@@ -413,12 +413,86 @@ class Btl(_IPluginModule):
         )
         return True
 
+    def __verify_captcha(self, client, url, params):
+        """
+        自动识别并绕过图文验证码（如连续查看 50 次触发的 getViewGateCaptcha 验证）
+        """
+        try:
+            import ddddocr
+        except ImportError:
+            self.error(f"【{self.module_name}】触发了图形验证码，但未安装 ddddocr 库，无法自动识别。请运行 pip install ddddocr")
+            return False
+
+        captcha_url = urljoin(self._tlist_url, "getViewGateCaptcha")
+        captcha_params = {"app_id": self._app_id, "identity": self._identity}
+
+        # 请求验证码图片接口
+        resp = client.get_res(url=captcha_url, params=captcha_params, allow_redirects=False)
+        if resp is None or resp.status_code != 200:
+            return False
+
+        try:
+            data = resp.json()
+            img_data = data.get("data") if isinstance(data, dict) else None
+            if not img_data:
+                return False
+            # 解析 base64 图片数据
+            if "," in img_data:
+                img_data = img_data.split(",")[1]
+            img_bytes = base64.b64decode(img_data)
+        except Exception:
+            return False
+
+        # 使用 ddddocr 识别验证码
+        try:
+            ocr = ddddocr.DdddOcr(show_ad=False)
+            code = ocr.classification(img_bytes)
+            if not code:
+                return False
+        except Exception as e:
+            self.error(f"【{self.module_name}】验证码 OCR 识别异常: {e}")
+            return False
+
+        # 提交验证码接口
+        verify_url = urljoin(self._tlist_url, "verifyGateCaptcha")
+        verify_data = {"app_id": self._app_id, "identity": self._identity, "code": code}
+
+        v_resp = client.post_res(url=verify_url, json=verify_data, allow_redirects=False)
+        if v_resp is not None and v_resp.status_code == 200:
+            try:
+                res_json = v_resp.json()
+                if isinstance(res_json, dict) and res_json.get("success"):
+                    self.info(f"【{self.module_name}】图形验证码自动识别并验证成功：{code}")
+                    return True
+            except Exception:
+                pass
+        return False
+
     def __get_response(self, url, params=None):
         client = RequestUtils(
             headers=self._headers(), proxies=self._proxies(), session=self._session, timeout=15
         )
         with self._request_lock:
             resp = client.get_res(url=url, params=params, allow_redirects=False)
+
+            # 检测是否触发了图形验证码（通常返回 json 包含特定提示或特定状态，或者根据内容判断）
+            if resp is not None and resp.status_code == 200:
+                try:
+                    # 如果返回的是 JSON 且提示需要验证码或频繁访问
+                    ct = resp.headers.get("Content-Type", "").lower()
+                    if "application/json" in ct:
+                        body_json = resp.json()
+                        # 根据你实际抓包的验证码返回特征进行拦截（此处适配常见的验证提示）
+                        if isinstance(body_json, dict) and (
+                            "验证码" in str(body_json.get("message", "")) or
+                            body_json.get("code") == 401 or
+                            "captcha" in str(body_json).lower()
+                        ):
+                            if self.__verify_captcha(client, url, params):
+                                resp = client.get_res(url=url, params=params, allow_redirects=False)
+                except Exception:
+                    pass
+
             if (resp is not None and resp.status_code == 200
                     and "text/html" in resp.headers.get("Content-Type", "").lower()
                     and "ge_js_validator_" in resp.text):
