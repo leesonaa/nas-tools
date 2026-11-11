@@ -1,12 +1,13 @@
-FROM python:3.10.11-slim
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends \
+FROM python:3.10.11-alpine
+RUN apk add --no-cache --virtual .build-deps \
+        build-base \
         libffi-dev \
-        gcc \
-        musl-dev \
         libxml2-dev \
         libxslt-dev \
+        musl-dev \
     && apk add --no-cache $(echo $(wget --no-check-certificate -qO- https://raw.githubusercontent.com/leesonaa/nas-tools/master/package_list.txt)) \
+        libxml2 \
+        libxslt \
     && curl https://rclone.org/install.sh | bash \
     && if [ "$(uname -m)" = "x86_64" ]; then ARCH=amd64; elif [ "$(uname -m)" = "aarch64" ]; then ARCH=arm64; fi \
     && curl https://dl.min.io/client/mc/release/linux-${ARCH}/mc --create-dirs -o /usr/bin/mc \
