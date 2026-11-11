@@ -463,29 +463,67 @@ class Btl(_IPluginModule):
         keys = list(body.keys()) + (list(data.keys()) if isinstance(data, dict) else [])
         return any("captcha" in str(key).lower() for key in keys)
 
+    @staticmethod
+    def __brief(text, limit=200):
+        """截取响应内容用于日志，长串 base64 只保留开头，避免刷屏"""
+        text = re.sub(r"[A-Za-z0-9+/=]{60,}", lambda m: f"{m.group(0)[:20]}…(共{len(m.group(0))}字符)", str(text or ""))
+        return text[:limit]
+
+    @staticmethod
+    def __extract_captcha_image(resp):
+        """
+        从验证码接口响应里取出图片字节。兼容：直接返回图片；JSON 里的 base64
+        （可带 data:image 前缀，可在顶层或 data 下，字段名不固定）。取不到返回 None
+        """
+        ctype = resp.headers.get("Content-Type", "").lower()
+        content = resp.content or b""
+        if ctype.startswith("image/") or content[:4] in (b"\x89PNG", b"GIF8") or content[:3] == b"\xff\xd8\xff":
+            return content
+        try:
+            body = resp.json()
+        except ValueError:
+            return None
+        pools = []
+        if isinstance(body, dict):
+            pools.append(body)
+            if isinstance(body.get("data"), dict):
+                pools.append(body["data"])
+        for pool in pools:
+            for key in ("data", "image", "img", "captcha", "base64", "pic", "picture"):
+                value = pool.get(key)
+                if isinstance(value, str) and (value.startswith("data:image") or len(value) > 100):
+                    if "," in value[:100]:
+                        value = value.split(",", 1)[1]
+                    try:
+                        return base64.b64decode(value)
+                    except Exception:
+                        continue
+        return None
+
     def __recognize_captcha(self, client, ocr, captcha_url, captcha_params):
         """
-        获取一张验证码图片并识别，失败返回空字符串
+        获取一张验证码图片并识别，失败返回空字符串（失败原因都会写日志，便于排查）
         """
         resp = client.get_res(url=captcha_url, params=captcha_params, allow_redirects=False)
-        if resp is None or resp.status_code != 200:
+        if resp is None:
+            self.warn(f"【{self.module_name}】验证码接口无响应")
+            return ""
+        if resp.status_code != 200:
+            self.warn(f"【{self.module_name}】验证码接口返回 HTTP {resp.status_code}：{self.__brief(resp.text)}")
+            return ""
+        img_bytes = self.__extract_captcha_image(resp)
+        if not img_bytes:
+            self.warn(f"【{self.module_name}】无法从验证码接口响应中取出图片"
+                      f"（Content-Type：{resp.headers.get('Content-Type', '未知')}）：{self.__brief(resp.text)}")
             return ""
         try:
-            data = resp.json()
-            img_data = data.get("data") if isinstance(data, dict) else None
-            if not img_data:
-                return ""
-            # 解析 base64 图片数据
-            if "," in img_data:
-                img_data = img_data.split(",", 1)[1]
-            img_bytes = base64.b64decode(img_data)
-        except Exception:
-            return ""
-        try:
-            return (ocr.classification(img_bytes) or "").strip()
+            code = (ocr.classification(img_bytes) or "").strip()
         except Exception as e:
             self.error(f"【{self.module_name}】验证码 OCR 识别异常: {e}")
             return ""
+        if not code:
+            self.warn(f"【{self.module_name}】OCR 没有识别出内容（图片 {len(img_bytes)} 字节）")
+        return code
 
     def __verify_captcha(self, client):
         """
@@ -508,15 +546,19 @@ class Btl(_IPluginModule):
                 continue
             verify_data = {"app_id": self._app_id, "identity": self._identity, "code": code}
             v_resp = client.post_res(url=verify_url, json=verify_data, allow_redirects=False)
-            if v_resp is not None and v_resp.status_code == 200:
+            if v_resp is None:
+                reason = "验证接口无响应"
+            else:
                 try:
                     res_json = v_resp.json()
                 except ValueError:
                     res_json = None
-                if isinstance(res_json, dict) and res_json.get("success"):
+                if v_resp.status_code == 200 and isinstance(res_json, dict) and res_json.get("success"):
                     self.info(f"【{self.module_name}】图形验证码自动识别并验证成功：{code}（第 {attempt} 次尝试）")
                     return True
-            self.warn(f"【{self.module_name}】验证码识别结果 {code} 未通过验证（{attempt}/{self._captcha_max_attempts}）")
+                reason = f"HTTP {v_resp.status_code}：{self.__brief(v_resp.text)}"
+            self.warn(f"【{self.module_name}】验证码识别结果 {code} 未通过验证"
+                      f"（{attempt}/{self._captcha_max_attempts}）：{reason}")
         self.error(f"【{self.module_name}】图形验证码自动识别失败，60 秒内不再重试")
         self._captcha_block_until = time.time() + 60
         return False
@@ -536,7 +578,8 @@ class Btl(_IPluginModule):
                     if resp.content.lstrip()[:1] == b"{":
                         body_json = resp.json()
                         if self.__need_captcha(body_json):
-                            self.info(f"【{self.module_name}】站点要求验证：{body_json.get('message') or body_json.get('msg') or '未知提示'}，尝试自动识别验证码")
+                            if time.time() >= self._captcha_block_until:
+                                self.info(f"【{self.module_name}】站点要求验证：{body_json.get('message') or body_json.get('msg') or '未知提示'}，尝试自动识别验证码")
                             if self.__verify_captcha(client):
                                 resp = client.get_res(url=url, params=params, allow_redirects=False)
                 except Exception as e:
@@ -562,6 +605,9 @@ class Btl(_IPluginModule):
         return resp
 
     def __get_magnet(self, entry):
+        # 验证码识别刚失败的冷却期内，磁力接口必然还被拦，不再逐条请求
+        if time.time() < self._captcha_block_until:
+            return ""
         resource_id = entry.get("id")
         if resource_id:
             url = urljoin(self._tlist_url, "recordMagnetView")
