@@ -1,3 +1,4 @@
+import base64
 import hashlib
 import json
 import re
@@ -54,6 +55,12 @@ class Btl(_IPluginModule):
     _custom_ua = ""
     # 复用同一个连接池（keep-alive），省掉重复握手开销
     _session = None
+    # ddddocr 实例：初始化要加载 ONNX 模型，开销大，复用同一个实例
+    _ocr = None
+    # ddddocr 不可用（未安装/初始化失败）时置位，避免每次翻页都刷一遍错误日志
+    _ocr_unavailable = False
+    # 验证码识别错误时重新获取验证码重试的最大次数
+    _captcha_max_attempts = 3
 
     @staticmethod
     def get_fields():
@@ -141,6 +148,7 @@ class Btl(_IPluginModule):
         self._ua = self._custom_ua or Config().get_ua()
         self._session = requests.Session()
         self._request_lock = Lock()
+        self._ocr_unavailable = False
         if self._cookie:
             host = urlparse(self._tlist_url).hostname
             if not host:
@@ -413,59 +421,98 @@ class Btl(_IPluginModule):
         )
         return True
 
-    def __verify_captcha(self, client, url, params):
+    def __get_ocr(self):
         """
-        自动识别并绕过图文验证码（如连续查看 50 次触发的 getViewGateCaptcha 验证）
+        获取复用的 ddddocr 实例，不可用时返回 None（只在第一次失败时记录错误）
         """
+        if self._ocr is not None:
+            return self._ocr
+        if self._ocr_unavailable:
+            return None
         try:
             import ddddocr
+            self._ocr = ddddocr.DdddOcr(show_ad=False)
         except ImportError:
+            self._ocr_unavailable = True
             self.error(f"【{self.module_name}】触发了图形验证码，但未安装 ddddocr 库，无法自动识别。请运行 pip install ddddocr")
+        except Exception as e:
+            self._ocr_unavailable = True
+            self.error(f"【{self.module_name}】ddddocr 初始化失败: {e}")
+        return self._ocr
+
+    @staticmethod
+    def __need_captcha(body):
+        """
+        判断接口返回是否为验证码拦截。只看状态字段和字段名，不看列表数据里的值，
+        避免资源标题里恰好出现“验证码”/“captcha”被误判
+        """
+        if not isinstance(body, dict):
             return False
+        data = body.get("data")
+        # 正常的列表/磁力结果一定不是验证码拦截
+        if isinstance(data, dict) and ("list" in data or "zlink" in data):
+            return False
+        if body.get("code") == 401:
+            return True
+        message = str(body.get("message") or body.get("msg") or "")
+        if "验证码" in message or "captcha" in message.lower():
+            return True
+        keys = list(body.keys()) + (list(data.keys()) if isinstance(data, dict) else [])
+        return any("captcha" in str(key).lower() for key in keys)
 
-        captcha_url = urljoin(self._tlist_url, "getViewGateCaptcha")
-        captcha_params = {"app_id": self._app_id, "identity": self._identity}
-
-        # 请求验证码图片接口
+    def __recognize_captcha(self, client, ocr, captcha_url, captcha_params):
+        """
+        获取一张验证码图片并识别，失败返回空字符串
+        """
         resp = client.get_res(url=captcha_url, params=captcha_params, allow_redirects=False)
         if resp is None or resp.status_code != 200:
-            return False
-
+            return ""
         try:
             data = resp.json()
             img_data = data.get("data") if isinstance(data, dict) else None
             if not img_data:
-                return False
+                return ""
             # 解析 base64 图片数据
             if "," in img_data:
-                img_data = img_data.split(",")[1]
+                img_data = img_data.split(",", 1)[1]
             img_bytes = base64.b64decode(img_data)
         except Exception:
-            return False
-
-        # 使用 ddddocr 识别验证码
+            return ""
         try:
-            ocr = ddddocr.DdddOcr(show_ad=False)
-            code = ocr.classification(img_bytes)
-            if not code:
-                return False
+            return (ocr.classification(img_bytes) or "").strip()
         except Exception as e:
             self.error(f"【{self.module_name}】验证码 OCR 识别异常: {e}")
+            return ""
+
+    def __verify_captcha(self, client):
+        """
+        自动识别并绕过图文验证码（如连续查看 50 次触发的 getViewGateCaptcha 验证），
+        识别错误时重新获取验证码重试，最多 _captcha_max_attempts 次
+        """
+        ocr = self.__get_ocr()
+        if ocr is None:
             return False
 
-        # 提交验证码接口
+        captcha_url = urljoin(self._tlist_url, "getViewGateCaptcha")
         verify_url = urljoin(self._tlist_url, "verifyGateCaptcha")
-        verify_data = {"app_id": self._app_id, "identity": self._identity, "code": code}
+        captcha_params = {"app_id": self._app_id, "identity": self._identity}
 
-        v_resp = client.post_res(url=verify_url, json=verify_data, allow_redirects=False)
-        if v_resp is not None and v_resp.status_code == 200:
-            try:
-                res_json = v_resp.json()
+        for attempt in range(1, self._captcha_max_attempts + 1):
+            code = self.__recognize_captcha(client, ocr, captcha_url, captcha_params)
+            if not code:
+                continue
+            verify_data = {"app_id": self._app_id, "identity": self._identity, "code": code}
+            v_resp = client.post_res(url=verify_url, json=verify_data, allow_redirects=False)
+            if v_resp is not None and v_resp.status_code == 200:
+                try:
+                    res_json = v_resp.json()
+                except ValueError:
+                    res_json = None
                 if isinstance(res_json, dict) and res_json.get("success"):
-                    self.info(f"【{self.module_name}】图形验证码自动识别并验证成功：{code}")
+                    self.info(f"【{self.module_name}】图形验证码自动识别并验证成功：{code}（第 {attempt} 次尝试）")
                     return True
-            except Exception:
-                pass
+            self.warn(f"【{self.module_name}】验证码识别结果 {code} 未通过验证（{attempt}/{self._captcha_max_attempts}）")
+        self.error(f"【{self.module_name}】图形验证码自动识别失败")
         return False
 
     def __get_response(self, url, params=None):
@@ -482,13 +529,8 @@ class Btl(_IPluginModule):
                     ct = resp.headers.get("Content-Type", "").lower()
                     if "application/json" in ct:
                         body_json = resp.json()
-                        # 根据你实际抓包的验证码返回特征进行拦截（此处适配常见的验证提示）
-                        if isinstance(body_json, dict) and (
-                            "验证码" in str(body_json.get("message", "")) or
-                            body_json.get("code") == 401 or
-                            "captcha" in str(body_json).lower()
-                        ):
-                            if self.__verify_captcha(client, url, params):
+                        if self.__need_captcha(body_json):
+                            if self.__verify_captcha(client):
                                 resp = client.get_res(url=url, params=params, allow_redirects=False)
                 except Exception:
                     pass
