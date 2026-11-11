@@ -1,4 +1,4 @@
-FROM python:3.10.11-slim-bullseye
+FROM python:3.10-slim-bookworm
 COPY --from=shinsenter/s6-overlay / /
 RUN set -xe && \
     export DEBIAN_FRONTEND="noninteractive" && \
@@ -15,9 +15,9 @@ RUN set -xe && \
     ln -sf /usr/bin/chromedriver /usr/lib/chromium/chromedriver && \
     # Python settings
     update-alternatives --install /usr/bin/python python /usr/local/bin/python3.10 3 && \
-    update-alternatives --install /usr/bin/python python /usr/bin/python3.9 2 && \
+    update-alternatives --install /usr/bin/python python /usr/bin/python3.11 2 && \
     update-alternatives --install /usr/bin/python3 python3 /usr/local/bin/python3.10 3 && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 2 && \
+    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 2 && \
     # Rclone
     curl https://rclone.org/install.sh | bash && \
     # Minio
