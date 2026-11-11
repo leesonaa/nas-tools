@@ -61,6 +61,8 @@ class Btl(_IPluginModule):
     _ocr_unavailable = False
     # 验证码识别错误时重新获取验证码重试的最大次数
     _captcha_max_attempts = 3
+    # 一轮识别全部失败后的冷却截止时间（秒级时间戳），冷却期内不再重复尝试，避免对站点狂刷
+    _captcha_block_until = 0
 
     @staticmethod
     def get_fields():
@@ -455,7 +457,8 @@ class Btl(_IPluginModule):
         if body.get("code") == 401:
             return True
         message = str(body.get("message") or body.get("msg") or "")
-        if "验证码" in message or "captcha" in message.lower():
+        # 站点实际返回的提示是“请验证后继续查看”，不含“验证码”三个字，所以匹配“验证”
+        if "验证" in message or "captcha" in message.lower():
             return True
         keys = list(body.keys()) + (list(data.keys()) if isinstance(data, dict) else [])
         return any("captcha" in str(key).lower() for key in keys)
@@ -489,6 +492,8 @@ class Btl(_IPluginModule):
         自动识别并绕过图文验证码（如连续查看 50 次触发的 getViewGateCaptcha 验证），
         识别错误时重新获取验证码重试，最多 _captcha_max_attempts 次
         """
+        if time.time() < self._captcha_block_until:
+            return False
         ocr = self.__get_ocr()
         if ocr is None:
             return False
@@ -512,7 +517,8 @@ class Btl(_IPluginModule):
                     self.info(f"【{self.module_name}】图形验证码自动识别并验证成功：{code}（第 {attempt} 次尝试）")
                     return True
             self.warn(f"【{self.module_name}】验证码识别结果 {code} 未通过验证（{attempt}/{self._captcha_max_attempts}）")
-        self.error(f"【{self.module_name}】图形验证码自动识别失败")
+        self.error(f"【{self.module_name}】图形验证码自动识别失败，60 秒内不再重试")
+        self._captcha_block_until = time.time() + 60
         return False
 
     def __get_response(self, url, params=None):
@@ -525,15 +531,16 @@ class Btl(_IPluginModule):
             # 检测是否触发了图形验证码（通常返回 json 包含特定提示或特定状态，或者根据内容判断）
             if resp is not None and resp.status_code == 200:
                 try:
-                    # 如果返回的是 JSON 且提示需要验证码或频繁访问
-                    ct = resp.headers.get("Content-Type", "").lower()
-                    if "application/json" in ct:
+                    # 不依赖 Content-Type（站点可能用 text/html 返回 JSON），
+                    # 正文以 { 开头才按 JSON 解析；种子文件是二进制，不会进入这里
+                    if resp.content.lstrip()[:1] == b"{":
                         body_json = resp.json()
                         if self.__need_captcha(body_json):
+                            self.info(f"【{self.module_name}】站点要求验证：{body_json.get('message') or body_json.get('msg') or '未知提示'}，尝试自动识别验证码")
                             if self.__verify_captcha(client):
                                 resp = client.get_res(url=url, params=params, allow_redirects=False)
-                except Exception:
-                    pass
+                except Exception as e:
+                    self.warn(f"【{self.module_name}】验证码处理异常: {e}")
 
             if (resp is not None and resp.status_code == 200
                     and "text/html" in resp.headers.get("Content-Type", "").lower()
@@ -572,6 +579,9 @@ class Btl(_IPluginModule):
                         return magnet
                     message = data.get("message") if isinstance(data, dict) else None
                     self.error(f"【{self.module_name}】磁力接口未返回有效链接：{message or '未知错误'}")
+                    if self.__need_captcha(data):
+                        # 仍被验证拦截时，下载种子的接口同样会被拦，不再白白请求一次
+                        return ""
         else:
             self.warn(f"【{self.module_name}】匹配的资源缺少 ID，尝试下载种子")
         return self.__download_magnet(entry)
