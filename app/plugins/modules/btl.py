@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import io
 import json
 import re
 import time
@@ -61,6 +62,11 @@ class Btl(_IPluginModule):
     _ocr_unavailable = False
     # 验证码识别错误时重新获取验证码重试的最大次数
     _captcha_max_attempts = 3
+    # 验证码接口（相对 getTList 所在目录）：GET 取图，POST 提交校验
+    _captcha_get_path = "getViewGateCaptcha"
+    _captcha_verify_path = "verifyMovieView"
+    # 验证码字符集：数字 + 小写字母（提交统一用小写）
+    _captcha_charset = "0123456789abcdefghijklmnopqrstuvwxyz"
     # 一轮识别全部失败后的冷却截止时间（秒级时间戳），冷却期内不再重复尝试，避免对站点狂刷
     _captcha_block_until = 0
 
@@ -434,6 +440,11 @@ class Btl(_IPluginModule):
         try:
             import ddddocr
             self._ocr = ddddocr.DdddOcr(show_ad=False)
+            try:
+                # 限定输出范围到数字和小写字母，避免识别成汉字/符号
+                self._ocr.set_ranges(self._captcha_charset)
+            except Exception:
+                pass
         except ImportError:
             self._ocr_unavailable = True
             self.error(f"【{self.module_name}】触发了图形验证码，但未安装 ddddocr 库，无法自动识别。请运行 pip install ddddocr")
@@ -469,66 +480,108 @@ class Btl(_IPluginModule):
         text = re.sub(r"[A-Za-z0-9+/=]{60,}", lambda m: f"{m.group(0)[:20]}…(共{len(m.group(0))}字符)", str(text or ""))
         return text[:limit]
 
-    @staticmethod
-    def __extract_captcha_image(resp):
+    def __fetch_captcha(self, client):
         """
-        从验证码接口响应里取出图片字节。兼容：直接返回图片；JSON 里的 base64
-        （可带 data:image 前缀，可在顶层或 data 下，字段名不固定）。取不到返回 None
+        获取验证码，返回 (key, 图片字节, 字符数)；失败返回 None（原因写日志）
+        响应：{"data": {"key": "...", "img": "data:image/gif;base64,...", "ttl": 90, "length": 5}}
         """
-        ctype = resp.headers.get("Content-Type", "").lower()
-        content = resp.content or b""
-        if ctype.startswith("image/") or content[:4] in (b"\x89PNG", b"GIF8") or content[:3] == b"\xff\xd8\xff":
-            return content
-        try:
-            body = resp.json()
-        except ValueError:
-            return None
-        pools = []
-        if isinstance(body, dict):
-            pools.append(body)
-            if isinstance(body.get("data"), dict):
-                pools.append(body["data"])
-        for pool in pools:
-            for key in ("data", "image", "img", "captcha", "base64", "pic", "picture"):
-                value = pool.get(key)
-                if isinstance(value, str) and (value.startswith("data:image") or len(value) > 100):
-                    if "," in value[:100]:
-                        value = value.split(",", 1)[1]
-                    try:
-                        return base64.b64decode(value)
-                    except Exception:
-                        continue
-        return None
-
-    def __recognize_captcha(self, client, ocr, captcha_url, captcha_params):
-        """
-        获取一张验证码图片并识别，失败返回空字符串（失败原因都会写日志，便于排查）
-        """
-        resp = client.get_res(url=captcha_url, params=captcha_params, allow_redirects=False)
+        url = urljoin(self._tlist_url, self._captcha_get_path)
+        resp = client.get_res(url=url, params={"app_id": self._app_id, "identity": self._identity},
+                              allow_redirects=False)
         if resp is None:
             self.warn(f"【{self.module_name}】验证码接口无响应")
-            return ""
+            return None
         if resp.status_code != 200:
             self.warn(f"【{self.module_name}】验证码接口返回 HTTP {resp.status_code}：{self.__brief(resp.text)}")
-            return ""
-        img_bytes = self.__extract_captcha_image(resp)
-        if not img_bytes:
-            self.warn(f"【{self.module_name}】无法从验证码接口响应中取出图片"
-                      f"（Content-Type：{resp.headers.get('Content-Type', '未知')}）：{self.__brief(resp.text)}")
-            return ""
+            return None
         try:
-            code = (ocr.classification(img_bytes) or "").strip()
+            data = resp.json()["data"]
+            key, img = data["key"], data["img"]
+            if "," in img[:100]:
+                img = img.split(",", 1)[1]
+            return key, base64.b64decode(img), int(data.get("length") or 5)
+        except Exception:
+            self.warn(f"【{self.module_name}】无法解析验证码接口响应：{self.__brief(resp.text)}")
+            return None
+
+    @staticmethod
+    def __split_glyphs(cv2, np, gray, length):
+        """
+        把一帧里的亮色笔画切成 length 个字符框（按 x 排序），返回 (框列表, 二值图)
+        """
+        mask = (gray >= 180).astype(np.uint8) * 255
+        # 膨胀后再找连通域，把同一个字符断开的笔画连起来
+        joined = cv2.dilate(mask, np.ones((5, 5), np.uint8))
+        count, _, stats, _ = cv2.connectedComponentsWithStats(joined)
+        boxes = [list(map(int, stats[i][:4])) for i in range(1, count) if stats[i][4] > 30]
+        boxes.sort(key=lambda b: b[0])
+        # 碎片多于字符数时，不断合并间隔最小的相邻两块
+        while len(boxes) > length:
+            gaps = [boxes[i + 1][0] - (boxes[i][0] + boxes[i][2]) for i in range(len(boxes) - 1)]
+            i = gaps.index(min(gaps))
+            a, b = boxes[i], boxes[i + 1]
+            x0, y0 = min(a[0], b[0]), min(a[1], b[1])
+            x1, y1 = max(a[0] + a[2], b[0] + b[2]), max(a[1] + a[3], b[1] + b[3])
+            boxes[i:i + 2] = [[x0, y0, x1 - x0, y1 - y0]]
+        return boxes, mask
+
+    @staticmethod
+    def __glyph_png(cv2, np, mask, box, pad=6, size=48):
+        """
+        把单个字符裁成居中的 48x48 黑字白底 PNG
+        """
+        x, y, w, h = box
+        thick = cv2.dilate(mask, np.ones((2, 2), np.uint8))  # 笔画只有 1px，略加粗
+        crop = thick[max(0, y - pad):y + h + pad, max(0, x - pad):x + w + pad]
+        side = max(crop.shape)
+        canvas = np.zeros((side, side), np.uint8)
+        oy, ox = (side - crop.shape[0]) // 2, (side - crop.shape[1]) // 2
+        canvas[oy:oy + crop.shape[0], ox:ox + crop.shape[1]] = crop
+        canvas = cv2.resize(canvas, (size, size), interpolation=cv2.INTER_AREA)
+        return cv2.imencode(".png", 255 - canvas)[1].tobytes()
+
+    def __solve_captcha(self, ocr, img_bytes, length):
+        """
+        识别验证码，失败返回空字符串。
+        站点返回多帧 GIF：每帧里字符的位置、角度都在抖动，整图识别基本失败。
+        做法：逐帧二值化亮色笔画并切出 length 个字符，单字符识别后按位置累加各帧的概率，
+        取累计概率最大的字符（单帧常有错字，多帧投票后才稳定）
+        """
+        try:
+            import cv2
+            import numpy as np
+            from PIL import Image, ImageSequence
+            frames = [np.array(f.convert("L")) for f in ImageSequence.Iterator(Image.open(io.BytesIO(img_bytes)))]
+            if len(frames) <= 1:
+                # 静态图直接整图识别
+                return (ocr.classification(img_bytes) or "").strip().lower()
+
+            allowed = self._captcha_charset
+            acc = [{} for _ in range(length)]
+            used = 0
+            for gray in frames:
+                boxes, mask = self.__split_glyphs(cv2, np, gray, length)
+                if len(boxes) != length:
+                    continue
+                used += 1
+                for pos, box in enumerate(boxes):
+                    result = ocr.classification(self.__glyph_png(cv2, np, mask, box), probability=True)
+                    probs = np.array(result["probabilities"])[:, 0, :].max(axis=0)
+                    for ch, prob in zip(result["charset"], probs):
+                        if ch and ch in allowed:
+                            acc[pos][ch] = acc[pos].get(ch, 0.0) + float(prob)
+            if not used:
+                return ""
+            return "".join(max(a, key=a.get) for a in acc)
         except Exception as e:
-            self.error(f"【{self.module_name}】验证码 OCR 识别异常: {e}")
+            self.error(f"【{self.module_name}】验证码识别异常: {e}")
             return ""
-        if not code:
-            self.warn(f"【{self.module_name}】OCR 没有识别出内容（图片 {len(img_bytes)} 字节）")
-        return code
 
     def __verify_captcha(self, client):
         """
-        自动识别并绕过图文验证码（如连续查看 50 次触发的 getViewGateCaptcha 验证），
-        识别错误时重新获取验证码重试，最多 _captcha_max_attempts 次
+        自动识别并通过图形验证码（连续查看 50 次后触发）：
+        GET getViewGateCaptcha 取图 -> 识别 -> POST verifyMovieView 提交 {"code", "key"}，
+        识别错误时重新取新验证码重试，最多 _captcha_max_attempts 次
         """
         if time.time() < self._captcha_block_until:
             return False
@@ -536,16 +589,20 @@ class Btl(_IPluginModule):
         if ocr is None:
             return False
 
-        captcha_url = urljoin(self._tlist_url, "getViewGateCaptcha")
-        verify_url = urljoin(self._tlist_url, "verifyGateCaptcha")
-        captcha_params = {"app_id": self._app_id, "identity": self._identity}
+        verify_url = urljoin(self._tlist_url, self._captcha_verify_path)
+        params = {"app_id": self._app_id, "identity": self._identity}
 
         for attempt in range(1, self._captcha_max_attempts + 1):
-            code = self.__recognize_captcha(client, ocr, captcha_url, captcha_params)
-            if not code:
+            captcha = self.__fetch_captcha(client)
+            if not captcha:
                 continue
-            verify_data = {"app_id": self._app_id, "identity": self._identity, "code": code}
-            v_resp = client.post_res(url=verify_url, json=verify_data, allow_redirects=False)
+            key, img_bytes, length = captcha
+            code = self.__solve_captcha(ocr, img_bytes, length)
+            if not code:
+                self.warn(f"【{self.module_name}】验证码没有识别出内容（{attempt}/{self._captcha_max_attempts}）")
+                continue
+            v_resp = client.post_res(url=verify_url, params=params, json={"code": code, "key": key},
+                                     allow_redirects=False)
             if v_resp is None:
                 reason = "验证接口无响应"
             else:
